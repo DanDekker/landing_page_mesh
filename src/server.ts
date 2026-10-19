@@ -1,7 +1,7 @@
 import { realpathSync } from 'node:fs';
-import { isAbsolute, relative, resolve } from 'node:path';
+import { isAbsolute, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { COUNT, ROWS, COLUMNS, HZ, DEFAULT_SETTINGS, IDLE_POINTER, createEdges, writeShape, normalizeSettings, type FieldSettings, type Pointer } from './shared/field.ts';
+import { COUNT, ROWS, COLUMNS, HZ, DEFAULT_SETTINGS, IDLE_POINTER, createEdges, writeShape, normalizeSettings, type FieldSettings, type Pointer, type WheelKick } from './shared/field.ts';
 import type { PrivateFactory, PrivateField, FieldPulse } from './server/provider.ts';
 
 const ROOT = fileURLToPath(new URL('../', import.meta.url));
@@ -19,13 +19,13 @@ export async function loadPrivateFactory(): Promise<PrivateFactory | null> {
   if (!input) return null;
   if (!isAbsolute(input)) throw new Error('The private adapter must use an absolute external path.');
   const path = realpathSync(input), fromRoot = relative(realpathSync(ROOT), path);
-  if (!fromRoot.startsWith('..') || fromRoot === '..') throw new Error('The private adapter must stay outside the public repository.');
+  if (!fromRoot.startsWith(`..${sep}`)) throw new Error('The private adapter must stay outside the public repository.');
   const module = await import(pathToFileURL(path).href);
   if (typeof module.createField !== 'function') throw new Error('The private adapter must export createField.');
   return module.createField as PrivateFactory;
 }
 
-type Session = { field: PrivateField; settings: FieldSettings; pointer: Pointer; pulses: FieldPulse[]; reset: boolean; visible: boolean; previous: number; lastSent: number; frame: Float32Array };
+type Session = { field: PrivateField; settings: FieldSettings; pointer: Pointer; pulses: FieldPulse[]; kicks: WheelKick[]; reset: boolean; visible: boolean; dirty: boolean; previous: number; lastSent: number; frame: Float32Array };
 
 export function createServer(options: { port?: number; hostname?: string; privateFactory?: PrivateFactory | null } = {}) {
   const factory = options.privateFactory ?? null;
@@ -45,7 +45,7 @@ export function createServer(options: { port?: number; hostname?: string; privat
         try {
           const positions = new Float32Array(COUNT * 3); writeShape(positions, 'silk');
           field = factory({ count: COUNT, rows: ROWS, columns: COLUMNS, hz: HZ, positions, edges: createEdges() });
-          if (server.upgrade(request, { data: { field, settings: { ...DEFAULT_SETTINGS }, pointer: { ...IDLE_POINTER }, pulses: [], reset: false, visible: true, previous: performance.now(), lastSent: 0, frame: new Float32Array(COUNT * 3 + 2) } })) return;
+          if (server.upgrade(request, { data: { field, settings: { ...DEFAULT_SETTINGS }, pointer: { ...IDLE_POINTER }, pulses: [], kicks: [], reset: false, visible: true, dirty: true, previous: performance.now(), lastSent: 0, frame: new Float32Array(COUNT * 3 + 2) } })) return;
           field.dispose();
         } catch (error) { field?.dispose(); console.error('Private field could not start:', error); return respond('Field unavailable', 503); }
         return respond('Upgrade required', 426);
@@ -66,14 +66,18 @@ export function createServer(options: { port?: number; hostname?: string; privat
         if (typeof message !== 'string') return;
         try {
           const data = JSON.parse(message), session = socket.data;
-          if (data.type === 'settings' && data.settings && typeof data.settings === 'object') session.settings = normalizeSettings(data.settings, session.settings);
+          if (data.type === 'settings' && data.settings && typeof data.settings === 'object') { session.settings = normalizeSettings(data.settings, session.settings); session.dirty = true; }
           if (data.type === 'pointer' && data.pointer) {
             const p = data.pointer;
-            if ([p.x, p.y, p.z].every((value: unknown) => typeof value === 'number' && Number.isFinite(value) && Math.abs(value) < 30)) session.pointer = { x: p.x, y: p.y, z: p.z, down: p.down === true, active: p.active === true };
+            if ([p.x, p.y, p.z].every((value: unknown) => typeof value === 'number' && Number.isFinite(value) && Math.abs(value) < 30)) session.pointer = { x: p.x, y: p.y, z: p.z, down: p.down === true, active: p.active === true, index: Number.isInteger(p.index) && p.index >= 0 && p.index < COUNT ? p.index : -1 };
           }
           if (data.type === 'pulse' && session.pulses.length < 6 && [data.x, data.y, data.z].every((value: unknown) => typeof value === 'number' && Number.isFinite(value) && Math.abs(value) < 30)) session.pulses.push({ x: data.x, y: data.y, z: data.z });
-          if (data.type === 'reset') session.reset = true;
-          if (data.type === 'visibility') { session.visible = data.visible === true; session.previous = performance.now(); }
+          if (data.type === 'wheel' && data.kick && session.kicks.length < 8) {
+            const kick = data.kick;
+            if ([kick.delta, kick.x, kick.y, kick.z].every((value: unknown) => typeof value === 'number' && Number.isFinite(value) && Math.abs(value) <= 1)) session.kicks.push({ delta: kick.delta, x: kick.x, y: kick.y, z: kick.z });
+          }
+          if (data.type === 'reset') { session.reset = true; session.dirty = true; }
+          if (data.type === 'visibility') { session.visible = data.visible === true; session.previous = performance.now(); session.dirty = true; }
         } catch { /* Invalid messages do not change the field. */ }
       },
       close(socket) { clients.delete(socket); socket.data.field.dispose(); },
@@ -84,14 +88,14 @@ export function createServer(options: { port?: number; hostname?: string; privat
     const now = performance.now();
     for (const socket of clients) {
       const session = socket.data, elapsed = Math.max(0, Math.min(80, now - session.previous)); session.previous = now;
-      if (!session.visible) continue;
+      if (!session.visible || (session.settings.paused && !session.dirty)) continue;
       try {
-        const frame = session.field.advance({ elapsedNanoseconds: Math.round(elapsed * 1e6), settings: session.settings, pointer: session.pointer, pulses: session.pulses, reset: session.reset });
-        session.pulses.length = 0; session.reset = false;
-        if (frame.positions.length !== COUNT * 3 || !Number.isFinite(frame.time)) throw new Error('Invalid field frame');
+        const frame = session.field.advance({ elapsedNanoseconds: Math.round(elapsed * 1e6), settings: session.settings, pointer: session.pointer, pulses: session.pulses, kicks: session.kicks, reset: session.reset });
+        session.pulses.length = 0; session.kicks.length = 0; session.reset = false;
+        if (frame.positions.length !== COUNT * 3 || !Number.isFinite(frame.time) || !frame.positions.every(value => Number.isFinite(value) && Math.abs(value) < 10)) throw new Error('Invalid field frame');
         if (now - session.lastSent < 1000 / 60 || socket.getBufferedAmount() > session.frame.byteLength * 3) continue;
         session.frame[0] = frame.time; session.frame[1] = COUNT; session.frame.set(frame.positions, 2);
-        socket.sendBinary(session.frame); session.lastSent = now;
+        socket.sendBinary(session.frame); session.lastSent = now; session.dirty = false;
       } catch (error) { console.error('Private field stopped:', error); socket.close(1011, 'Field unavailable'); }
     }
   }, 1000 / HZ);
