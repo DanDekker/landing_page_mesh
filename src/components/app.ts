@@ -19,7 +19,6 @@ export class MeshApp extends HTMLElement {
       if (media.matches) this.settings.paused = true;
     } catch { /* Storage is optional. */ }
     this.addEventListener('mesh-settings', event => this.configure((event as CustomEvent).detail), { signal });
-    this.addEventListener('mesh-action', event => this.action((event as CustomEvent).detail), { signal });
     this.addEventListener('mesh-error', event => { this.querySelector('.field-message')!.textContent = (event as CustomEvent).detail; }, { signal });
     window.addEventListener('keydown', event => {
       if (event.altKey || event.ctrlKey || event.metaKey || (event.target as Element)?.closest('input,textarea,select,[contenteditable="true"]')) return;
@@ -28,10 +27,6 @@ export class MeshApp extends HTMLElement {
       if (event.code === 'Space' && !(event.target as Element)?.closest('button,a')) { event.preventDefault(); this.action('pause'); }
     }, { signal });
     media.addEventListener('change', event => { if (event.matches) this.configure({ paused: true }); }, { signal });
-    document.addEventListener('fullscreenchange', () => {
-      const button = this.querySelector<HTMLButtonElement>('[data-action="fullscreen"]');
-      if (button?.firstChild) button.firstChild.textContent = document.fullscreenElement ? 'Leave full screen ' : 'Fill the screen ';
-    }, { signal });
     this.reflect();
     // Children are upgraded after this custom element, or may already exist.
     customElements.whenDefined('particle-field').then(() => { if (this.isConnected) this.field?.configure(this.settings); });
@@ -49,20 +44,11 @@ export class MeshApp extends HTMLElement {
 
   private reflect() {
     this.querySelector<HTMLElement>('.gallery')!.dataset.paused = String(this.settings.paused);
-    this.querySelector('[data-state]')!.textContent = this.settings.paused ? 'AT REST' : 'IN MOTION';
-    const index = FORMS.indexOf(this.settings.form), name = this.settings.form.toUpperCase();
-    this.querySelector('[data-form-label]')!.textContent = `0${index + 1} — ${name}`;
-    this.querySelector('[data-caption]')!.textContent = this.settings.paused ? `${name}, AT REST` : `${name}, IN CONTINUOUS MOTION`;
-    this.querySelector('.edition-number')!.textContent = `00${index + 1}`;
     if (this.controls instanceof MeshControls) this.controls.reflect(this.settings);
   }
 
   private async action(action: string) {
     if (action === 'pause') this.configure({ paused: !this.settings.paused });
     if (action === 'reset') this.field?.reset();
-    if (action === 'fullscreen') {
-      try { if (document.fullscreenElement) await document.exitFullscreen(); else await document.documentElement.requestFullscreen(); }
-      catch { this.querySelector('.field-message')!.textContent = 'Full screen is unavailable in this window.'; }
-    }
   }
 }
