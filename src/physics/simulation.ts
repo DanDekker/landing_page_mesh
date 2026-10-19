@@ -8,8 +8,8 @@ export class Simulation {
   readonly anchors = new Float32Array(COUNT * 3);
   readonly desired = new Float32Array(COUNT * 3);
   readonly previous = new Float32Array(COUNT * 3);
-  readonly edges = createEdges();
-  readonly lengths = new Float32Array(this.edges.length / 2);
+  edges = createEdges();
+  lengths = new Float32Array(this.edges.length / 2);
   settings: FieldSettings = { ...DEFAULT_SETTINGS };
   pointer: Pointer = { ...IDLE_POINTER };
   time = 0;
@@ -21,7 +21,16 @@ export class Simulation {
     this.reset();
   }
 
-  configure(settings: Partial<FieldSettings>) { this.settings = normalizeSettings(settings, this.settings); }
+  configure(settings: Partial<FieldSettings>) {
+    const previousForm = this.settings.form;
+    this.settings = normalizeSettings(settings, this.settings);
+    if (previousForm !== this.settings.form) {
+      this.edges = createEdges(this.settings.form);
+      this.lengths = new Float32Array(this.edges.length / 2);
+      if (this.settings.paused) this.reset();
+      else this.updateLengths();
+    }
+  }
 
   reset() {
     this.time = 0;

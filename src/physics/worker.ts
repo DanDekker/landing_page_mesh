@@ -10,7 +10,7 @@ function send() {
   worker.postMessage({ type: 'frame', positions, time: simulation.time }, [positions.buffer]);
 }
 worker.onmessage = ({ data }: MessageEvent) => {
-  if (data.type === 'settings') simulation.configure(data.settings as Partial<FieldSettings>);
+  if (data.type === 'settings') { simulation.configure(data.settings as Partial<FieldSettings>); send(); }
   if (data.type === 'pointer') simulation.pointer = data.pointer as Pointer;
   if (data.type === 'pulse') simulation.pulse(data.x, data.y, data.z);
   if (data.type === 'reset') { simulation.reset(); send(); }

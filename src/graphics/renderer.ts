@@ -1,4 +1,4 @@
-import { COUNT, COLUMNS, ROWS, createEdges, type Palette, type Pointer } from '../shared/field.ts';
+import { COUNT, COLUMNS, ROWS, createEdges, gridIndex, type Form, type Palette, type Pointer } from '../shared/field.ts';
 
 const VERTEX = `#version 300 es
 precision highp float;
@@ -30,7 +30,7 @@ void main() {
   float facing=pow(abs(dot(n,normalize(vec3(-.25,.6,1.)))),4.);
   float rim=pow(1.-abs(n.z),3.);
   float edge=pow(abs(aUV.y*2.-1.),8.);
-  float thread=.5+.5*sin(aUV.x*6.28318*3.+aUV.y*1.3);
+  float thread=.5+.5*sin(aUV.x*6.28318*3.+cos(aUV.y*6.28318)*.65);
   float light=.13+depth*.45+facing*.48+rim*.35+edge*.18;
   vec3 warm=mix(uColor*.47,uColor,thread*.5+.5);
   vec3 highlight=mix(uColor,vec3(1.,.92,.79),.7);
@@ -117,6 +117,8 @@ export class FieldRenderer {
   private positionBuffer: WebGLBuffer;
   private normalBuffer: WebGLBuffer;
   private edgeCount: number;
+  private edgeBuffer: WebGLBuffer;
+  private form: Form = 'silk';
   private normals = new Float32Array(COUNT * 3);
   private scene?: Target;
   private bloomA?: Target;
@@ -150,7 +152,7 @@ export class FieldRenderer {
     for (let i = 0; i < COUNT; i++) { uv[i * 2] = Math.floor(i / COLUMNS) / (ROWS - 1); uv[i * 2 + 1] = (i % COLUMNS) / (COLUMNS - 1); }
     this.attribute(2, uv, 2, gl.STATIC_DRAW);
     const edges = createEdges();
-    const index = gl.createBuffer()!; this.buffers.push(index);
+    const index = gl.createBuffer()!; this.buffers.push(index); this.edgeBuffer = index;
     gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, index);
     gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, edges, gl.STATIC_DRAW);
     this.edgeCount = edges.length;
@@ -226,13 +228,21 @@ export class FieldRenderer {
 
   palette(palette: Palette) { this.goalColor = [...COLORS[palette]]; }
 
+  topology(form: Form) {
+    if (this.form === form) return;
+    this.form = form;
+    const gl = this.gl, edges = createEdges(form);
+    gl.bindVertexArray(this.meshVAO); gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.edgeBuffer);
+    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, edges, gl.STATIC_DRAW); this.edgeCount = edges.length; gl.bindVertexArray(null);
+  }
+
   private geometry(positions: Float32Array) {
     const gl = this.gl;
     for (let row = 0; row < ROWS; row++) {
       for (let column = 0; column < COLUMNS; column++) {
         const a = (row * COLUMNS + column) * 3;
-        const x0 = (Math.max(0, row - 1) * COLUMNS + column) * 3, x1 = (Math.min(ROWS - 1, row + 1) * COLUMNS + column) * 3;
-        const y0 = (row * COLUMNS + Math.max(0, column - 1)) * 3, y1 = (row * COLUMNS + Math.min(COLUMNS - 1, column + 1)) * 3;
+        const x0 = gridIndex(this.form, row - 1, column) * 3, x1 = gridIndex(this.form, row + 1, column) * 3;
+        const y0 = gridIndex(this.form, row, column - 1) * 3, y1 = gridIndex(this.form, row, column + 1) * 3;
         const ax = positions[x1]! - positions[x0]!, ay = positions[x1 + 1]! - positions[x0 + 1]!, az = positions[x1 + 2]! - positions[x0 + 2]!;
         const bx = positions[y1]! - positions[y0]!, by = positions[y1 + 1]! - positions[y0 + 1]!, bz = positions[y1 + 2]! - positions[y0 + 2]!;
         const nx = ay * bz - az * by, ny = az * bx - ax * bz, nz = ax * by - ay * bx;

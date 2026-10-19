@@ -26,13 +26,13 @@ export function normalizeSettings(input: Partial<FieldSettings>, previous = DEFA
 export function writeShape(target: Float32Array, form: Form, time = 0): void {
   const tau = Math.PI * 2;
   for (let row = 0; row < ROWS; row++) {
-    const u = row / (ROWS - 1) * tau;
+    const u = row / (form === 'wave' ? ROWS - 1 : ROWS) * tau;
     const cu = Math.cos(u), su = Math.sin(u);
     for (let column = 0; column < COLUMNS; column++) {
-      const v = column / (COLUMNS - 1) * 2 - 1;
+      const v = column / (form === 'orbit' ? COLUMNS : COLUMNS - 1) * 2 - 1;
       const at = (row * COLUMNS + column) * 3;
       if (form === 'silk') {
-        const twist = u * 1.5 + .2 * Math.sin(time * .17);
+        const twist = u + .2 * Math.sin(time * .17);
         const width = v * (.66 + .1 * Math.cos(u * 3 + time * .11));
         const radius = 1.48 + width * Math.cos(twist);
         target[at] = radius * cu;
@@ -56,14 +56,22 @@ export function writeShape(target: Float32Array, form: Form, time = 0): void {
   }
 }
 
-export function createEdges(): Uint16Array {
+export function gridIndex(form: Form, row: number, column: number): number {
+  const r = form === 'wave' ? Math.max(0, Math.min(ROWS - 1, row)) : (row + ROWS) % ROWS;
+  const c = form === 'orbit' ? (column + COLUMNS) % COLUMNS : Math.max(0, Math.min(COLUMNS - 1, column));
+  return r * COLUMNS + c;
+}
+
+export function createEdges(form: Form = 'silk'): Uint16Array {
   const edges: number[] = [];
   for (let row = 0; row < ROWS; row++) {
     for (let column = 0; column < COLUMNS; column++) {
       const i = row * COLUMNS + column;
-      if (row + 1 < ROWS) edges.push(i, i + COLUMNS);
-      if (column + 1 < COLUMNS) edges.push(i, i + 1);
-      if (row + 1 < ROWS && column + 1 < COLUMNS && (row + column) % 2 === 0) edges.push(i, i + COLUMNS + 1);
+      const nextRow = row + 1 < ROWS || form !== 'wave';
+      const nextColumn = column + 1 < COLUMNS || form === 'orbit';
+      if (nextRow) edges.push(i, gridIndex(form, row + 1, column));
+      if (nextColumn) edges.push(i, gridIndex(form, row, column + 1));
+      if (nextRow && nextColumn && (row + column) % 2 === 0) edges.push(i, gridIndex(form, row + 1, column + 1));
     }
   }
   return new Uint16Array(edges);

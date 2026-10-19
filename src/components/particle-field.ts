@@ -31,7 +31,7 @@ export class ParticleField extends HTMLElement {
     catch (error) { this.failure(error); return; }
     this.canvas.addEventListener('webglcontextlost', event => { event.preventDefault(); cancelAnimationFrame(this.raf); this.raf = 0; }, { signal });
     this.canvas.addEventListener('webglcontextrestored', () => {
-      try { this.renderer?.dispose(); this.renderer = new FieldRenderer(this.canvas!); this.resize(); this.renderer.palette(this.settings.palette); this.requestFrame(); }
+      try { this.renderer?.dispose(); this.renderer = new FieldRenderer(this.canvas!); this.resize(); this.renderer.palette(this.settings.palette); this.renderer.topology(this.settings.form); this.requestFrame(); }
       catch (error) { this.failure(error); }
     }, { signal });
     this.resizeObserver = new ResizeObserver(() => this.resize()); this.resizeObserver.observe(this);
@@ -72,6 +72,7 @@ export class ParticleField extends HTMLElement {
   configure(input: Partial<FieldSettings>) {
     this.settings = normalizeSettings(input, this.settings);
     this.renderer?.palette(this.settings.palette);
+    this.renderer?.topology(this.settings.form);
     this.send({ type: 'settings', settings: this.settings }); this.requestFrame();
   }
 
