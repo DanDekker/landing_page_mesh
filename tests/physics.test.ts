@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { Simulation } from '../src/physics/simulation.ts';
-import { COUNT, ROWS, COLUMNS, FORMS, HZ, createEdges, normalizeSettings, writeShape } from '../src/shared/field.ts';
+import { COUNT, ROWS, COLUMNS, FORMS, HZ, createEdges, pointIndices, normalizeSettings, writeShape } from '../src/shared/field.ts';
 
 describe('field geometry', () => {
   test('all forms fit the same valid topology', () => {
@@ -15,6 +15,36 @@ describe('field geometry', () => {
 
   test('settings reject invalid values without losing prior state', () => {
     expect(normalizeSettings({ turbulence: Infinity, tension: -4, form: 'unknown' as never })).toMatchObject({ turbulence: .32, tension: 0, form: 'silk' });
+  });
+
+  test('sphere, cube and pyramid retain their exact undeformed surfaces', () => {
+    const positions = new Float32Array(COUNT * 3);
+    for (const form of ['sphere', 'cube', 'pyramid'] as const) {
+      writeShape(positions, form);
+      let error = 0;
+      for (const index of pointIndices(form)) {
+        const x = positions[index * 3]!, y = positions[index * 3 + 1]!, z = positions[index * 3 + 2]!;
+        if (form === 'sphere') error = Math.max(error, Math.abs(Math.hypot(x, y, z) - 1.36));
+        if (form === 'cube') error = Math.max(error, Math.abs(Math.max(Math.abs(x), Math.abs(y), Math.abs(z)) - 1.04));
+        if (form === 'pyramid') error = Math.max(error, Math.min(Math.abs(y + .84), Math.abs(Math.max(Math.abs(x), Math.abs(z)) / 1.22 + (y + .84) / 2.35 - 1)));
+      }
+      expect(error).toBeLessThan(.000001);
+    }
+  });
+
+  test('closed caps share one visible vertex and contain no disconnected or collapsed edges', () => {
+    for (const form of ['sphere', 'cube', 'pyramid'] as const) {
+      const points = pointIndices(form), active = new Set(points), edges = createEdges(form);
+      let lower = 0, upper = 0;
+      expect(points.length).toBe(ROWS * (COLUMNS - 2) + 2);
+      for (let edge = 0; edge < edges.length; edge += 2) {
+        const a = edges[edge]!, b = edges[edge + 1]!;
+        expect(active.has(a) && active.has(b)).toBe(true); expect(a).not.toBe(b);
+        if (a === 0 || b === 0) lower++;
+        if (a === COLUMNS - 1 || b === COLUMNS - 1) upper++;
+      }
+      expect(lower).toBe(ROWS); expect(upper).toBe(ROWS);
+    }
   });
 
   test('closed forms share their seam vertices without a gap or long closing edge', () => {

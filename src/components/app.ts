@@ -22,7 +22,8 @@ export class MeshApp extends HTMLElement {
     this.addEventListener('mesh-error', event => { this.querySelector('.field-message')!.textContent = (event as CustomEvent).detail; }, { signal });
     window.addEventListener('keydown', event => {
       if (event.altKey || event.ctrlKey || event.metaKey || (event.target as Element)?.closest('input,textarea,select,[contenteditable="true"]')) return;
-      if (['1', '2', '3', '4'].includes(event.key)) { event.preventDefault(); this.configure({ form: FORMS[Number(event.key) - 1]! }); }
+      const form = FORMS[Number(event.key) - 1];
+      if (form) { event.preventDefault(); this.configure({ form }); }
       if (event.key.toLowerCase() === 'r') { event.preventDefault(); this.action('reset'); }
       if (event.code === 'Space' && !(event.target as Element)?.closest('button,a')) { event.preventDefault(); this.action('pause'); }
     }, { signal });

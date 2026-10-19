@@ -16,9 +16,9 @@ bun start       # build and serve
 Bun, TypeScript, HTML, CSS, Web Components and raw WebGL 2. No external packages,
 font downloads, CDNs, or runtime services.
 
-Silk, Orbit and Knot have connected seams. Wave is open. Mouse and touch disturb the
+Silk, Orbit, Knot, Sphere, Cube and Pyramid are closed. Wave is open. Mouse and touch disturb the
 field; dragging pulls it, a tap releases a ripple, and scrolling winds or unwinds
-the surface. Keys 1–4 change the
+the surface. Keys 1–7 change the
 form, Space pauses, and R resets. Reduced-motion preferences start it paused.
 
 The public checkout includes an independent browser simulation. An optional

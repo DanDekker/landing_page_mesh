@@ -41,8 +41,11 @@ mesh-controls { pointer-events: auto; }
   .wordmark { font-size: 28px; }.author { font-size: 11px; gap: 11px; }
   .gallery-bottom { bottom: max(24px, env(safe-area-inset-bottom)); }
   .form-button { padding: 9px 23px; min-height: 42px; }
+  .control-surface { max-width: 340px; }
+  .forms { flex-wrap: wrap; justify-content: center; }
+  .form-button { flex: 0 0 calc(25% - 3px); padding-left: 10px; padding-right: 10px; }
 }
-@media (max-width: 380px) { .form-button { padding-left: 18px; padding-right: 18px; } }
+@media (max-width: 380px) { .control-surface { max-width: 290px; } }
 @media (prefers-reduced-motion: no-preference) {
   .masthead, .gallery-bottom { animation: arrive 1.2s ease both; }
   @keyframes arrive { from { opacity: 0; } to { opacity: 1; } }

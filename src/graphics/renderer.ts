@@ -1,4 +1,4 @@
-import { COUNT, COLUMNS, ROWS, createEdges, gridIndex, writeShape, type Form, type Palette, type Pointer } from '../shared/field.ts';
+import { COUNT, COLUMNS, ROWS, createEdges, gridIndex, writeShape, isCapped, pointIndices, type Form, type Palette, type Pointer } from '../shared/field.ts';
 import { fit, project, unproject, inverseRotate, type View } from './camera.ts';
 
 const VERTEX = `#version 300 es
@@ -18,6 +18,7 @@ uniform vec2 uCenter;
 uniform vec3 uPointer;
 uniform float uContact;
 uniform float uEnergy;
+uniform float uCapped;
 out vec3 vColor;
 out float vAlpha;
 vec3 rotate(vec3 p) {
@@ -29,7 +30,7 @@ vec3 rotate(vec3 p) {
 void main() {
   vec3 point=aPosition;
   if(uDust>.5) { point.x+=sin(uTime*.03+aUV.x*10.)*.1;point.y+=cos(uTime*.04+aUV.y*9.)*.08; }
-  vec3 p=rotate(point),n=normalize(rotate(aNormal));
+  vec3 p=rotate(point),n=normalize(rotate(aNormal)+vec3(0.,0.,.00001));
   float perspective=5.5/(5.5+p.z);
   gl_Position=vec4(p.x*uScale*perspective/uAspect+uCenter.x,p.y*uScale*perspective+uCenter.y,.5+p.z*.065,1.);
   float depth=clamp(1.-(p.z+2.4)/5.,.12,1.);
@@ -44,6 +45,7 @@ void main() {
   vec3 highlight=mix(uColor,vec3(.81,1.,.88),.75);
   vColor=mix(warm,highlight,clamp(pow(facing,2.)*.4+edge*.1+charge*.7,0.,1.))*(light+charge*.8+uEnergy*.3);
   vAlpha=(.3+depth*.7)*(1.-uDust*.91);
+  if(uCapped>.5) vAlpha*=sqrt(max(.08,sin(aUV.y*3.14159265)));
   gl_PointSize=(1.25+depth*.7+facing*.5+edge*.35+charge*1.4)*uDpr*perspective;
   if(uDust>.5) { vColor=uColor*.45;vAlpha*=.3+.7*aUV.y;gl_PointSize=(.6+aUV.x*.7)*uDpr; }
 }`;
@@ -127,6 +129,8 @@ export class FieldRenderer {
   private stressBuffer: WebGLBuffer;
   private edgeCount: number;
   private edgeBuffer: WebGLBuffer;
+  private pointBuffer: WebGLBuffer;
+  private pointList = pointIndices('silk');
   private form: Form = 'silk';
   private normals = new Float32Array(COUNT * 3);
   private stresses = new Float32Array(COUNT);
@@ -178,6 +182,9 @@ export class FieldRenderer {
     gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, index);
     gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, edges, gl.STATIC_DRAW);
     this.edgeCount = edges.length;
+    this.pointBuffer = gl.createBuffer()!; this.buffers.push(this.pointBuffer);
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.pointBuffer); gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, this.pointList, gl.STATIC_DRAW);
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.edgeBuffer);
     this.dustVAO = gl.createVertexArray()!;
     gl.bindVertexArray(this.dustVAO);
     const dust = new Float32Array(this.dustCount * 3), dustUV = new Float32Array(this.dustCount * 2), dustNormals = new Float32Array(this.dustCount * 3);
@@ -264,6 +271,10 @@ export class FieldRenderer {
     const gl = this.gl, edges = createEdges(form);
     gl.bindVertexArray(this.meshVAO); gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.edgeBuffer);
     gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, edges, gl.STATIC_DRAW); this.edgeCount = edges.length; gl.bindVertexArray(null);
+    this.pointList = pointIndices(form);
+    gl.bindVertexArray(this.meshVAO); gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.pointBuffer);
+    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, this.pointList, gl.STATIC_DRAW);
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.edgeBuffer); gl.bindVertexArray(null);
   }
 
   private geometry(positions: Float32Array) {
@@ -271,6 +282,9 @@ export class FieldRenderer {
     for (let row = 0; row < ROWS; row++) {
       for (let column = 0; column < COLUMNS; column++) {
         const a = (row * COLUMNS + column) * 3;
+        if (isCapped(this.form) && (column === 0 || column === COLUMNS - 1)) {
+          this.normals[a] = 0; this.normals[a + 1] = column === 0 ? -1 : 1; this.normals[a + 2] = 0; this.stresses[row * COLUMNS + column] = 0; continue;
+        }
         const x0 = gridIndex(this.form, row - 1, column) * 3, x1 = gridIndex(this.form, row + 1, column) * 3;
         const y0 = gridIndex(this.form, row, column - 1) * 3, y1 = gridIndex(this.form, row, column + 1) * 3;
         const ax = positions[x1]! - positions[x0]!, ay = positions[x1 + 1]! - positions[x0 + 1]!, az = positions[x1 + 2]! - positions[x0 + 2]!;
@@ -296,6 +310,7 @@ export class FieldRenderer {
     gl.uniform2f(this.uniform(program, 'uCenter'), this.center[0]!, this.center[1]!);
     gl.uniform3f(this.uniform(program, 'uPointer'), this.contact.x, this.contact.y, this.contact.z);
     gl.uniform1f(this.uniform(program, 'uContact'), this.contactStrength); gl.uniform1f(this.uniform(program, 'uEnergy'), this.wheelEnergy);
+    gl.uniform1f(this.uniform(program, 'uCapped'), dust ? 0 : isCapped(this.form) ? 1 : 0);
     gl.uniform1f(this.uniform(program, 'uDpr'), this.dpr); gl.uniform1f(this.uniform(program, 'uTime'), time); gl.uniform1f(this.uniform(program, 'uDust'), dust);
   }
 
@@ -330,7 +345,8 @@ export class FieldRenderer {
     gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
     gl.bindVertexArray(this.dustVAO); this.meshUniforms(this.points, time, 1); gl.drawArrays(gl.POINTS, 0, this.dustCount);
     gl.bindVertexArray(this.meshVAO); this.meshUniforms(this.lines, time, 0); gl.drawElements(gl.LINES, this.edgeCount, gl.UNSIGNED_SHORT, 0);
-    this.meshUniforms(this.points, time, 0); gl.drawArrays(gl.POINTS, 0, COUNT);
+    this.meshUniforms(this.points, time, 0); gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.pointBuffer); gl.drawElements(gl.POINTS, this.pointList.length, gl.UNSIGNED_SHORT, 0);
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.edgeBuffer);
     gl.bindVertexArray(null); gl.disable(gl.BLEND);
     this.blurPass(this.scene.texture, this.bloomA, 1.6 / this.bloomA.width, 0);
     this.blurPass(this.bloomA.texture, this.bloomB, 0, 1.6 / this.bloomB.height);
@@ -355,7 +371,7 @@ export class FieldRenderer {
     const [pitch, yaw, roll] = this.rotation;
     const cx = Math.cos(pitch!), sx = Math.sin(pitch!), cy = Math.cos(yaw!), sy = Math.sin(yaw!), cz = Math.cos(roll!), sz = Math.sin(roll!);
     const scale = this.scale * this.zoom, positions = this.currentPositions;
-    for (let index = 0; index < COUNT; index++) {
+    for (const index of this.pointList) {
       const at = index * 3, px = positions[at]!, py = positions[at + 1]!, pz = positions[at + 2]!;
       const ry = cx * py - sx * pz, rz = sx * py + cx * pz, rx = cy * px + sy * rz, depth = -sy * px + cy * rz;
       const perspective = 5.5 / (5.5 + depth);

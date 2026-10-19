@@ -1,4 +1,4 @@
-export type Form = 'silk' | 'orbit' | 'wave' | 'knot';
+export type Form = 'silk' | 'orbit' | 'wave' | 'knot' | 'sphere' | 'cube' | 'pyramid';
 export type Palette = 'alpine';
 export type FieldSettings = { form: Form; turbulence: number; tension: number; paused: boolean; palette: Palette };
 export type Pointer = { x: number; y: number; z: number; active: boolean; down: boolean; index?: number };
@@ -8,7 +8,7 @@ export const COLUMNS = 40;
 export const COUNT = ROWS * COLUMNS;
 export const HZ = 77;
 export const DEFAULT_SETTINGS: FieldSettings = { form: 'silk', turbulence: .32, tension: .65, paused: false, palette: 'alpine' };
-export const FORMS: Form[] = ['silk', 'orbit', 'wave', 'knot'];
+export const FORMS: Form[] = ['silk', 'orbit', 'wave', 'knot', 'sphere', 'cube', 'pyramid'];
 export const PALETTES: Palette[] = ['alpine'];
 export const IDLE_POINTER: Pointer = { x: 0, y: 0, z: 0, active: false, down: false };
 
@@ -53,6 +53,31 @@ export function writeShape(target: Float32Array, form: Form, time = 0, torsion =
         target[at] = radius * Math.cos(u * 2);
         target[at + 1] = .5 * Math.sin(u * 3) + width * Math.sin(twist);
         target[at + 2] = radius * Math.sin(u * 2);
+      } else if (isCapped(form)) {
+        let x: number, y: number, z: number;
+        if (form === 'sphere') {
+          const latitude = v * Math.PI * .5, radius = Math.cos(latitude) * 1.36;
+          x = radius * cu; y = Math.sin(latitude) * 1.36; z = radius * su;
+        } else {
+          const side = row / ROWS * 4, edge = Math.floor(side), t = (side - edge) * 2 - 1;
+          const px = edge === 0 ? 1 : edge === 1 ? -t : edge === 2 ? -1 : t;
+          const pz = edge === 0 ? t : edge === 1 ? 1 : edge === 2 ? -t : -1;
+          let radius: number;
+          if (form === 'cube') {
+            radius = column <= 8 ? column / 8 : column >= 31 ? (COLUMNS - 1 - column) / 8 : 1;
+            y = column <= 8 ? -1.04 : column >= 31 ? 1.04 : (column - 8) / 23 * 2.08 - 1.04;
+            x = px * radius * 1.04; z = pz * radius * 1.04;
+          } else {
+            const height = Math.max(0, (column - 8) / (COLUMNS - 1 - 8));
+            radius = column <= 8 ? column / 8 : 1 - height;
+            y = -.84 + height * 2.35;
+            x = px * radius * 1.22; z = pz * radius * 1.22;
+          }
+        }
+        const twist = torsion * y * .8;
+        target[at] = x * Math.cos(twist) - z * Math.sin(twist);
+        target[at + 1] = y;
+        target[at + 2] = x * Math.sin(twist) + z * Math.cos(twist);
       } else {
         const a = (row / (ROWS - 1) * 2 - 1) * 2.25;
         const b = v * 1.18;
@@ -66,9 +91,21 @@ export function writeShape(target: Float32Array, form: Form, time = 0, torsion =
   }
 }
 
+export function isCapped(form: Form) { return form === 'sphere' || form === 'cube' || form === 'pyramid'; }
+
+export function pointIndices(form: Form): Uint16Array {
+  const indices: number[] = [];
+  for (let row = 0; row < ROWS; row++) for (let column = 0; column < COLUMNS; column++) {
+    if (isCapped(form) && row > 0 && (column === 0 || column === COLUMNS - 1)) continue;
+    indices.push(row * COLUMNS + column);
+  }
+  return new Uint16Array(indices);
+}
+
 export function gridIndex(form: Form, row: number, column: number): number {
   const r = form === 'wave' ? Math.max(0, Math.min(ROWS - 1, row)) : (row + ROWS) % ROWS;
   const c = form === 'orbit' ? (column + COLUMNS) % COLUMNS : Math.max(0, Math.min(COLUMNS - 1, column));
+  if (isCapped(form) && (c === 0 || c === COLUMNS - 1)) return c;
   return r * COLUMNS + c;
 }
 
@@ -77,11 +114,13 @@ export function createEdges(form: Form = 'silk'): Uint16Array {
   for (let row = 0; row < ROWS; row++) {
     for (let column = 0; column < COLUMNS; column++) {
       const i = row * COLUMNS + column;
+      if (isCapped(form) && column === 0) { edges.push(0, row * COLUMNS + 1); continue; }
+      if (isCapped(form) && column === COLUMNS - 1) continue;
       const nextRow = row + 1 < ROWS || form !== 'wave';
       const nextColumn = column + 1 < COLUMNS || form === 'orbit';
       if (nextRow) edges.push(i, gridIndex(form, row + 1, column));
       if (nextColumn) edges.push(i, gridIndex(form, row, column + 1));
-      if (nextRow && nextColumn && (row + column) % 2 === 0) edges.push(i, gridIndex(form, row + 1, column + 1));
+      if (nextRow && nextColumn && (!isCapped(form) || column < COLUMNS - 2) && (row + column) % 2 === 0) edges.push(i, gridIndex(form, row + 1, column + 1));
     }
   }
   return new Uint16Array(edges);
