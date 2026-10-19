@@ -1,10 +1,12 @@
-import { COUNT, COLUMNS, ROWS, createEdges, gridIndex, type Form, type Palette, type Pointer } from '../shared/field.ts';
+import { COUNT, COLUMNS, ROWS, createEdges, gridIndex, writeShape, type Form, type Palette, type Pointer } from '../shared/field.ts';
+import { fit, project, unproject, inverseRotate, type View } from './camera.ts';
 
 const VERTEX = `#version 300 es
 precision highp float;
 layout(location=0) in vec3 aPosition;
 layout(location=1) in vec3 aNormal;
 layout(location=2) in vec2 aUV;
+layout(location=3) in float aStress;
 uniform vec3 uRotation;
 uniform vec3 uColor;
 uniform float uScale;
@@ -12,6 +14,10 @@ uniform float uAspect;
 uniform float uDpr;
 uniform float uTime;
 uniform float uDust;
+uniform vec2 uCenter;
+uniform vec3 uPointer;
+uniform float uContact;
+uniform float uEnergy;
 out vec3 vColor;
 out float vAlpha;
 vec3 rotate(vec3 p) {
@@ -25,18 +31,20 @@ void main() {
   if(uDust>.5) { point.x+=sin(uTime*.03+aUV.x*10.)*.1;point.y+=cos(uTime*.04+aUV.y*9.)*.08; }
   vec3 p=rotate(point),n=normalize(rotate(aNormal));
   float perspective=5.5/(5.5+p.z);
-  gl_Position=vec4(p.x*uScale*perspective/uAspect,p.y*uScale*perspective+.055,.5+p.z*.065,1.);
+  gl_Position=vec4(p.x*uScale*perspective/uAspect+uCenter.x,p.y*uScale*perspective+uCenter.y,.5+p.z*.065,1.);
   float depth=clamp(1.-(p.z+2.4)/5.,.12,1.);
   float facing=pow(abs(dot(n,normalize(vec3(-.25,.6,1.)))),4.);
   float rim=pow(1.-abs(n.z),3.);
   float edge=pow(abs(aUV.y*2.-1.),8.);
   float thread=.5+.5*sin(aUV.x*6.28318*3.+cos(aUV.y*6.28318)*.65);
-  float light=.13+depth*.45+facing*.48+rim*.35+edge*.18;
-  vec3 warm=mix(uColor*.47,uColor,thread*.5+.5);
-  vec3 highlight=mix(uColor,vec3(1.,.92,.79),.7);
-  vColor=mix(warm,highlight,pow(facing,2.)*.5+edge*.12)*light;
-  vAlpha=(.2+depth*.65)*(1.-uDust*.91);
-  gl_PointSize=(1.35+depth*.85+facing*.65+edge*.4)*uDpr*perspective;
+  float contact=exp(-dot(aPosition-uPointer,aPosition-uPointer)*8.)*uContact;
+  float charge=clamp(aStress*.8+contact*.6,0.,1.);
+  float light=.3+depth*.6+facing*.7+rim*.5+edge*.2;
+  vec3 warm=mix(uColor*.68,uColor,thread*.4+.6);
+  vec3 highlight=mix(uColor,vec3(.81,1.,.88),.75);
+  vColor=mix(warm,highlight,clamp(pow(facing,2.)*.4+edge*.1+charge*.7,0.,1.))*(light+charge*.8+uEnergy*.3);
+  vAlpha=(.3+depth*.7)*(1.-uDust*.91);
+  gl_PointSize=(1.25+depth*.7+facing*.5+edge*.35+charge*1.4)*uDpr*perspective;
   if(uDust>.5) { vColor=uColor*.45;vAlpha*=.3+.7*aUV.y;gl_PointSize=(.6+aUV.x*.7)*uDpr; }
 }`;
 const POINT_FRAGMENT = `#version 300 es
@@ -56,7 +64,7 @@ precision highp float;
 in vec3 vColor;
 in float vAlpha;
 out vec4 color;
-void main() { color=vec4(vColor,vAlpha*.22); }`;
+void main() { color=vec4(vColor,vAlpha*.29); }`;
 const QUAD_VERTEX = `#version 300 es
 precision highp float;
 out vec2 vUV;
@@ -94,7 +102,7 @@ void main() {
   vec3 background=vec3(.027,.031,.030)+uColor*halo*.007;
   vec3 scene=texture(uScene,vUV).rgb;
   vec3 bloom=texture(uBloom,vUV).rgb;
-  vec3 lit=scene+bloom*.85;
+  vec3 lit=scene+bloom*.65;
   lit=lit/(vec3(1.)+lit*.38);
   vec3 result=background+lit;
   float vignette=1.-smoothstep(.35,1.25,length((vUV-.5)*vec2(1.,.85)))*.38;
@@ -104,7 +112,7 @@ void main() {
 }`;
 
 type Target = { texture: WebGLTexture; framebuffer: WebGLFramebuffer; width: number; height: number };
-const COLORS: Record<Palette, [number, number, number]> = { copper: [1, .56, .28], silver: [.81, .89, .95], glacial: [.27, .72, .95] };
+const COLORS: Record<Palette, [number, number, number]> = { alpine: [.24, .83, .52] };
 
 export class FieldRenderer {
   private gl: WebGL2RenderingContext;
@@ -116,10 +124,14 @@ export class FieldRenderer {
   private dustVAO: WebGLVertexArrayObject;
   private positionBuffer: WebGLBuffer;
   private normalBuffer: WebGLBuffer;
+  private stressBuffer: WebGLBuffer;
   private edgeCount: number;
   private edgeBuffer: WebGLBuffer;
   private form: Form = 'silk';
   private normals = new Float32Array(COUNT * 3);
+  private stresses = new Float32Array(COUNT);
+  private reference = new Float32Array(COUNT * 3);
+  private currentPositions?: Float32Array;
   private scene?: Target;
   private bloomA?: Target;
   private bloomB?: Target;
@@ -129,8 +141,17 @@ export class FieldRenderer {
   private aspect = 1;
   private scale = .65;
   private rotation = [.86, .12, -.31];
-  private color = [...COLORS.copper];
-  private goalColor = [...COLORS.copper];
+  private center = [0, .035];
+  private fitted = false;
+  private cameraTime = 0;
+  private lastTime = 0;
+  private zoom = 1;
+  private zoomVelocity = 0;
+  private wheelEnergy = 0;
+  private contact: Pointer = { x: 0, y: 0, z: 0, active: false, down: false };
+  private contactStrength = 0;
+  private color = [...COLORS.alpine];
+  private goalColor = [...COLORS.alpine];
   private uniforms = new Map<WebGLProgram, Map<string, WebGLUniformLocation | null>>();
   private buffers: WebGLBuffer[] = [];
   private programs: WebGLProgram[] = [];
@@ -148,6 +169,7 @@ export class FieldRenderer {
     gl.bindVertexArray(this.meshVAO);
     this.positionBuffer = this.attribute(0, new Float32Array(COUNT * 3), 3, gl.DYNAMIC_DRAW);
     this.normalBuffer = this.attribute(1, this.normals, 3, gl.DYNAMIC_DRAW);
+    this.stressBuffer = this.attribute(3, this.stresses, 1, gl.DYNAMIC_DRAW);
     const uv = new Float32Array(COUNT * 2);
     for (let i = 0; i < COUNT; i++) { uv[i * 2] = Math.floor(i / COLUMNS) / (ROWS - 1); uv[i * 2 + 1] = (i % COLUMNS) / (COLUMNS - 1); }
     this.attribute(2, uv, 2, gl.STATIC_DRAW);
@@ -219,7 +241,7 @@ export class FieldRenderer {
     const w = Math.round(this.width * this.dpr), h = Math.round(this.height * this.dpr);
     if (this.canvas.width === w && this.canvas.height === h && this.scene) return;
     this.canvas.width = w; this.canvas.height = h;
-    this.scale = Math.min(.7, this.aspect * .43);
+    this.fitted = false;
     this.deleteTarget(this.scene); this.deleteTarget(this.bloomA); this.deleteTarget(this.bloomB);
     this.scene = this.target(w, h);
     this.bloomA = this.target(Math.max(1, Math.floor(w / 3)), Math.max(1, Math.floor(h / 3)));
@@ -227,6 +249,14 @@ export class FieldRenderer {
   }
 
   palette(palette: Palette) { this.goalColor = [...COLORS[palette]]; }
+
+  touch(pointer: Pointer) { this.contact = { ...pointer }; }
+
+  wheel(delta: number) { this.zoomVelocity += delta * .25; this.wheelEnergy = Math.min(1, this.wheelEnergy + Math.abs(delta) * 1.5); }
+
+  axis() { return inverseRotate({ x: 0, y: 0, z: 1 }, this.rotation); }
+
+  private get view(): View { return { rotation: this.rotation, scale: this.scale * this.zoom, aspect: this.aspect, center: this.center }; }
 
   topology(form: Form) {
     if (this.form === form) return;
@@ -248,17 +278,24 @@ export class FieldRenderer {
         const nx = ay * bz - az * by, ny = az * bx - ax * bz, nz = ax * by - ay * bx;
         const length = Math.hypot(nx, ny, nz) || 1;
         this.normals[a] = nx / length; this.normals[a + 1] = ny / length; this.normals[a + 2] = nz / length;
+        const referenceLength = Math.hypot(this.reference[x1]! - this.reference[x0]!, this.reference[x1 + 1]! - this.reference[x0 + 1]!, this.reference[x1 + 2]! - this.reference[x0 + 2]!) + 1e-5;
+        const stretch = Math.min(1, Math.abs(Math.hypot(ax, ay, az) / referenceLength - 1) * 1.4);
+        this.stresses[row * COLUMNS + column] += (stretch - this.stresses[row * COLUMNS + column]!) * .17;
       }
     }
     gl.bindBuffer(gl.ARRAY_BUFFER, this.positionBuffer); gl.bufferSubData(gl.ARRAY_BUFFER, 0, positions);
     gl.bindBuffer(gl.ARRAY_BUFFER, this.normalBuffer); gl.bufferSubData(gl.ARRAY_BUFFER, 0, this.normals);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.stressBuffer); gl.bufferSubData(gl.ARRAY_BUFFER, 0, this.stresses);
   }
 
   private meshUniforms(program: WebGLProgram, time: number, dust: number) {
     const gl = this.gl; gl.useProgram(program);
     gl.uniform3f(this.uniform(program, 'uRotation'), this.rotation[0]!, this.rotation[1]!, this.rotation[2]!);
     gl.uniform3f(this.uniform(program, 'uColor'), this.color[0]!, this.color[1]!, this.color[2]!);
-    gl.uniform1f(this.uniform(program, 'uScale'), this.scale); gl.uniform1f(this.uniform(program, 'uAspect'), this.aspect);
+    gl.uniform1f(this.uniform(program, 'uScale'), this.scale * this.zoom); gl.uniform1f(this.uniform(program, 'uAspect'), this.aspect);
+    gl.uniform2f(this.uniform(program, 'uCenter'), this.center[0]!, this.center[1]!);
+    gl.uniform3f(this.uniform(program, 'uPointer'), this.contact.x, this.contact.y, this.contact.z);
+    gl.uniform1f(this.uniform(program, 'uContact'), this.contactStrength); gl.uniform1f(this.uniform(program, 'uEnergy'), this.wheelEnergy);
     gl.uniform1f(this.uniform(program, 'uDpr'), this.dpr); gl.uniform1f(this.uniform(program, 'uTime'), time); gl.uniform1f(this.uniform(program, 'uDust'), dust);
   }
 
@@ -272,7 +309,22 @@ export class FieldRenderer {
     if (!this.scene || !this.bloomA || !this.bloomB) return;
     const gl = this.gl;
     for (let i = 0; i < 3; i++) this.color[i] += (this.goalColor[i]! - this.color[i]!) * Math.min(1, delta * 3);
-    this.rotation = [.86 + Math.sin(time * .055) * .17, .12 + time * .045, -.31 + Math.sin(time * .04) * .13];
+    if (time < this.lastTime - .2) this.cameraTime = 0;
+    if (!this.contact.down) this.cameraTime += Math.max(0, Math.min(.1, time - this.lastTime));
+    this.lastTime = time;
+    this.rotation = [.86 + Math.sin(this.cameraTime * .055) * .17, .12 + this.cameraTime * .045, -.31 + Math.sin(this.cameraTime * .04) * .13];
+    writeShape(this.reference, this.form, time);
+    const framing = fit(positions, this.rotation, this.aspect), framingBlend = this.fitted ? 1 - Math.exp(-delta * 2.5) : 1;
+    if (!this.contact.down || !this.fitted) {
+      this.scale += (framing.scale - this.scale) * framingBlend;
+      for (let i = 0; i < 2; i++) this.center[i] += (framing.center[i]! - this.center[i]!) * framingBlend;
+      this.fitted = true;
+    }
+    this.zoomVelocity += (1 - this.zoom) * delta * 24; this.zoomVelocity *= Math.exp(-delta * 5.5);
+    this.zoom = Math.max(.86, Math.min(1.16, this.zoom + this.zoomVelocity * delta));
+    this.wheelEnergy *= Math.exp(-delta * 2.4);
+    this.contactStrength += ((this.contact.active ? (this.contact.down ? 1 : .35) : 0) - this.contactStrength) * (1 - Math.exp(-delta * 14));
+    this.currentPositions = positions;
     this.geometry(positions);
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.scene.framebuffer); gl.viewport(0, 0, this.scene.width, this.scene.height); gl.clearColor(0, 0, 0, 1); gl.clear(gl.COLOR_BUFFER_BIT);
     gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
@@ -289,16 +341,36 @@ export class FieldRenderer {
     gl.drawArrays(gl.TRIANGLES, 0, 3);
   }
 
-  pointer(clientX: number, clientY: number): Pointer {
-    const bounds = this.canvas.getBoundingClientRect();
-    let x = ((clientX - bounds.left) / this.width * 2 - 1) * this.aspect / this.scale;
-    let y = (1 - (clientY - bounds.top) / this.height * 2 - .055) / this.scale;
-    let z = 0;
+  point(index: number) {
+    const positions = this.currentPositions ?? this.reference, at = index * 3;
+    const position = { x: positions[at]!, y: positions[at + 1]!, z: positions[at + 2]! };
+    const p = project(position, this.view);
+    return { ...position, screenX: (p.x + 1) * this.width * .5, screenY: (1 - p.y) * this.height * .5, depth: p.z, index };
+  }
+
+  pick(clientX: number, clientY: number) {
+    if (!this.currentPositions) return null;
+    const bounds = this.canvas.getBoundingClientRect(), x = clientX - bounds.left, y = clientY - bounds.top;
+    let best = 42 * 42, selected = -1;
     const [pitch, yaw, roll] = this.rotation;
-    [x, y] = [Math.cos(-roll!) * x - Math.sin(-roll!) * y, Math.sin(-roll!) * x + Math.cos(-roll!) * y];
-    [x, z] = [Math.cos(-yaw!) * x + Math.sin(-yaw!) * z, -Math.sin(-yaw!) * x + Math.cos(-yaw!) * z];
-    [y, z] = [Math.cos(-pitch!) * y - Math.sin(-pitch!) * z, Math.sin(-pitch!) * y + Math.cos(-pitch!) * z];
-    return { x, y, z, active: true, down: false };
+    const cx = Math.cos(pitch!), sx = Math.sin(pitch!), cy = Math.cos(yaw!), sy = Math.sin(yaw!), cz = Math.cos(roll!), sz = Math.sin(roll!);
+    const scale = this.scale * this.zoom, positions = this.currentPositions;
+    for (let index = 0; index < COUNT; index++) {
+      const at = index * 3, px = positions[at]!, py = positions[at + 1]!, pz = positions[at + 2]!;
+      const ry = cx * py - sx * pz, rz = sx * py + cx * pz, rx = cy * px + sy * rz, depth = -sy * px + cy * rz;
+      const perspective = 5.5 / (5.5 + depth);
+      const dx = ((cz * rx - sz * ry) * scale * perspective / this.aspect + this.center[0]! + 1) * this.width * .5 - x;
+      const dy = (1 - ((sz * rx + cz * ry) * scale * perspective + this.center[1]!)) * this.height * .5 - y;
+      const score = dx * dx + dy * dy + (depth + 3) * 16;
+      if (score < best) { best = score; selected = index; }
+    }
+    return selected >= 0 ? this.point(selected) : null;
+  }
+
+  pointer(clientX: number, clientY: number, depth = 0): Pointer {
+    const bounds = this.canvas.getBoundingClientRect();
+    const point = unproject((clientX - bounds.left) / this.width * 2 - 1, 1 - (clientY - bounds.top) / this.height * 2, depth, this.view);
+    return { ...point, active: true, down: false };
   }
 
   dispose() {

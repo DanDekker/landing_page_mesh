@@ -1,4 +1,4 @@
-import { COUNT, HZ, DEFAULT_SETTINGS, IDLE_POINTER, normalizeSettings, writeShape, createEdges, type FieldSettings, type Pointer } from '../shared/field.ts';
+import { COUNT, ROWS, COLUMNS, HZ, DEFAULT_SETTINGS, IDLE_POINTER, normalizeSettings, writeShape, createEdges, type FieldSettings, type Pointer, type WheelKick } from '../shared/field.ts';
 
 // Standalone, original browser fallback. It is independent of the optional
 // proprietary server provider. Standard mass/spring projection only.
@@ -14,6 +14,8 @@ export class Simulation {
   pointer: Pointer = { ...IDLE_POINTER };
   time = 0;
   ticks = 0;
+  torsion = 0;
+  private torsionVelocity = 0;
   private pulses: { x: number; y: number; z: number; age: number; force: number }[] = [];
 
   constructor(settings?: Partial<FieldSettings>) {
@@ -35,6 +37,7 @@ export class Simulation {
   reset() {
     this.time = 0;
     this.ticks = 0;
+    this.torsion = 0; this.torsionVelocity = 0;
     this.pulses.length = 0;
     writeShape(this.positions, this.settings.form);
     this.anchors.set(this.positions);
@@ -47,6 +50,19 @@ export class Simulation {
     if (![x, y, z, force].every(Number.isFinite)) return;
     if (this.pulses.length >= 6) this.pulses.shift();
     this.pulses.push({ x, y, z, age: 0, force: Math.max(0, Math.min(2, force)) });
+  }
+
+  swirl(kick: WheelKick) {
+    if (![kick.delta, kick.x, kick.y, kick.z].every(Number.isFinite)) return;
+    const strength = Math.max(-.8, Math.min(.8, kick.delta)) * 1.6;
+    this.torsionVelocity = Math.max(-7, Math.min(7, this.torsionVelocity + kick.delta * 7));
+    for (let i = 0; i < COUNT; i++) {
+      const at = i * 3, x = this.positions[at]!, y = this.positions[at + 1]!, z = this.positions[at + 2]!;
+      const twist = .25 + .75 * Math.sin(Math.floor(i / COLUMNS) / ROWS * Math.PI * 2);
+      this.velocities[at] += (kick.y * z - kick.z * y) * strength * twist;
+      this.velocities[at + 1] += (kick.z * x - kick.x * z) * strength * twist;
+      this.velocities[at + 2] += (kick.x * y - kick.y * x) * strength * twist;
+    }
   }
 
   private updateLengths() {
@@ -63,7 +79,9 @@ export class Simulation {
     const { turbulence, tension } = this.settings;
     this.time += dt;
     this.ticks++;
-    writeShape(this.desired, this.settings.form, this.time);
+    this.torsionVelocity = (this.torsionVelocity - this.torsion * .8 * dt) * Math.exp(-dt * 1.6);
+    this.torsion = Math.max(-2.8, Math.min(2.8, this.torsion + this.torsionVelocity * dt));
+    writeShape(this.desired, this.settings.form, this.time, this.torsion);
     for (let i = 0; i < p.length; i++) this.anchors[i] += (this.desired[i]! - this.anchors[i]!) * .025;
     this.updateLengths();
     this.previous.set(p);
@@ -75,7 +93,18 @@ export class Simulation {
       let fx = (this.anchors[a]! - x) * restore + (Math.sin(y * 2.3 + t) + Math.cos(z * 1.7 - t * .7)) * turbulence * .65;
       let fy = (this.anchors[a + 1]! - y) * restore + (Math.sin(z * 2.1 + t * .8) - Math.cos(x * 1.8 + t)) * turbulence * .65;
       let fz = (this.anchors[a + 2]! - z) * restore + (Math.sin(x * 1.9 - t) + Math.cos(y * 2 + t * .5)) * turbulence * .65;
-      if (this.pointer.active) {
+      const grabbed = this.pointer.index ?? -1;
+      if (this.pointer.down && grabbed >= 0 && grabbed < COUNT) {
+        let dr = Math.abs(Math.floor(i / COLUMNS) - Math.floor(grabbed / COLUMNS));
+        let dc = Math.abs(i % COLUMNS - grabbed % COLUMNS);
+        if (this.settings.form !== 'wave') dr = Math.min(dr, ROWS - dr);
+        if (this.settings.form === 'orbit') dc = Math.min(dc, COLUMNS - dc);
+        const weight = Math.exp(-(dr * dr / 55 + dc * dc / 13)) * 180;
+        const anchor = grabbed * 3;
+        fx += (this.anchors[a]! + this.pointer.x - this.anchors[anchor]! - x) * weight;
+        fy += (this.anchors[a + 1]! + this.pointer.y - this.anchors[anchor + 1]! - y) * weight;
+        fz += (this.anchors[a + 2]! + this.pointer.z - this.anchors[anchor + 2]! - z) * weight;
+      } else if (this.pointer.active) {
         const dx = x - this.pointer.x, dy = y - this.pointer.y, dz = z - this.pointer.z;
         const d2 = dx * dx + dy * dy + dz * dz;
         const influence = Math.exp(-d2 * 2.2) * (this.pointer.down ? -25 : 7);
