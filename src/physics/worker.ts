@@ -1,0 +1,29 @@
+/// <reference lib="webworker" />
+import { Simulation } from './simulation.ts';
+import { HZ, type FieldSettings, type Pointer } from '../shared/field.ts';
+
+const simulation = new Simulation();
+let previous = performance.now(), remainder = 0, lastSent = 0, visible = true;
+const worker = self as unknown as DedicatedWorkerGlobalScope;
+function send() {
+  const positions = simulation.positions.slice();
+  worker.postMessage({ type: 'frame', positions, time: simulation.time }, [positions.buffer]);
+}
+worker.onmessage = ({ data }: MessageEvent) => {
+  if (data.type === 'settings') simulation.configure(data.settings as Partial<FieldSettings>);
+  if (data.type === 'pointer') simulation.pointer = data.pointer as Pointer;
+  if (data.type === 'pulse') simulation.pulse(data.x, data.y, data.z);
+  if (data.type === 'reset') { simulation.reset(); send(); }
+  if (data.type === 'visibility') { visible = data.visible; previous = performance.now(); remainder = 0; }
+};
+setInterval(() => {
+  const now = performance.now();
+  const elapsed = Math.min((now - previous) / 1000, .08);
+  previous = now;
+  if (!visible || simulation.settings.paused) { remainder = 0; return; }
+  remainder += elapsed;
+  let steps = 0;
+  while (remainder >= 1 / HZ && steps < 7) { simulation.step(); remainder -= 1 / HZ; steps++; }
+  if (steps && now - lastSent >= 1000 / 60) { send(); lastSent = now; }
+}, 1000 / HZ);
+send();
