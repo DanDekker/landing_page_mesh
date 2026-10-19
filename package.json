@@ -1,0 +1,16 @@
+{
+  "name": "mesh",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "UNLICENSED",
+  "packageManager": "bun@1.4.2",
+  "engines": { "bun": ">=1.4.2" },
+  "scripts": {
+    "dev": "bun run scripts/build.ts && bun --watch src/server.ts",
+    "start": "bun run scripts/build.ts && bun src/server.ts",
+    "build": "bun run scripts/build.ts",
+    "test": "bun test",
+    "check": "bun test && bun run scripts/build.ts && bun run scripts/audit.ts"
+  }
+}
