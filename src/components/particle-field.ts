@@ -1,5 +1,6 @@
 import { FieldRenderer } from '../graphics/renderer.ts';
 import type { SurfaceGrab } from '../graphics/grab.ts';
+import { wheelDelta } from '../shared/wheel.ts';
 import { COUNT, FRAME_HEADER, FORMS, DEFAULT_SETTINGS, IDLE_POINTER, writeShape, normalizeSettings, type FieldSettings, type Form, type Pointer } from '../shared/field.ts';
 
 export class ParticleField extends HTMLElement {
@@ -85,8 +86,7 @@ export class ParticleField extends HTMLElement {
     this.addEventListener('wheel', event => {
       event.preventDefault();
       if (!this.renderer || this.settings.paused || this.pointer.down) return;
-      const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? this.clientHeight : 1;
-      const delta = Math.max(-.35, Math.min(.35, -event.deltaY * unit * .002));
+      const delta = wheelDelta(event.deltaY, event.deltaMode, this.clientHeight);
       const axis = this.renderer.axis();
       this.send({ type: 'wheel', kick: { delta, ...axis } }); this.renderer.wheel(delta); this.requestFrame();
     }, { signal, passive: false });
@@ -212,7 +212,7 @@ export class ParticleField extends HTMLElement {
     if (!this.renderer || document.hidden) return;
     const delta = this.previous ? Math.min(.05, (now - this.previous) / 1000) : 1 / 60;
     this.previous = now;
-    const blend = 1 - Math.exp(-delta * 22);
+    const blend = 1 - Math.exp(-delta * 40);
     for (let i = 0; i < this.displayed.length; i++) this.displayed[i] += (this.target[i]! - this.displayed[i]!) * blend;
     this.displayedTime += (this.targetTime - this.displayedTime) * blend;
     this.renderer.render(this.displayed, this.displayedTime, delta);

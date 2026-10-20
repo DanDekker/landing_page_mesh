@@ -255,7 +255,7 @@ export class FieldRenderer {
 
   touch(pointer: Pointer) { this.contact = { ...pointer }; }
 
-  wheel(delta: number) { this.wheelEnergy = Math.min(1, this.wheelEnergy + Math.abs(delta) * 1.5); }
+  wheel(delta: number) { this.wheelEnergy = Math.min(1, this.wheelEnergy + Math.abs(delta) * 2.8); }
 
   axis() { return inverseRotate({ x: 0, y: 0, z: 1 }, this.view.rotation); }
 
@@ -329,7 +329,7 @@ export class FieldRenderer {
     const gl = this.gl;
     for (let i = 0; i < 3; i++) this.color[i] += (this.goalColor[i]! - this.color[i]!) * Math.min(1, delta * 3);
     this.camera.update(this.form, time, delta, this.contact.down);
-    this.wheelEnergy *= Math.exp(-delta * 2.4);
+    this.wheelEnergy *= Math.exp(-delta * 5.5);
     this.contactStrength += ((this.contact.active ? (this.contact.down ? 1 : .35) : 0) - this.contactStrength) * (1 - Math.exp(-delta * 14));
     this.currentPositions = positions;
     this.geometry(positions);

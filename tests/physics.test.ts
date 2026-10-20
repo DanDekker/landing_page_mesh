@@ -158,7 +158,7 @@ describe('standalone simulation', () => {
     let momentum = 0;
     for (let i = 0; i < COUNT; i++) momentum += simulation.positions[i * 3 + 2]! * simulation.velocities[i * 3]! - simulation.positions[i * 3]! * simulation.velocities[i * 3 + 2]!;
     expect(momentum).toBeGreaterThan(1);
-    for (let tick = 0; tick < HZ; tick++) simulation.step();
+    for (let tick = 0; tick < 6; tick++) simulation.step();
     expect(simulation.torsion).toBeGreaterThan(.3);
     expect(simulation.positions.every(value => Number.isFinite(value) && Math.abs(value) < 5)).toBe(true);
   });
@@ -166,11 +166,37 @@ describe('standalone simulation', () => {
   test('scrolling in opposite directions winds and unwinds the surface', () => {
     const simulation = new Simulation({ turbulence: 0 });
     simulation.swirl({ delta: .35, x: 0, y: 1, z: 0 });
-    for (let tick = 0; tick < HZ; tick++) simulation.step();
+    for (let tick = 0; tick < 15; tick++) simulation.step();
     const wound = simulation.torsion;
     simulation.swirl({ delta: -.35, x: 0, y: 1, z: 0 });
-    for (let tick = 0; tick < HZ; tick++) simulation.step();
+    for (let tick = 0; tick < 12; tick++) simulation.step();
     expect(simulation.torsion).toBeLessThan(wound * .5);
+  });
+
+  test('wheel movement is immediate and settles instead of slowly winding up', () => {
+    const wound = new Simulation({ turbulence: 0 }), idle = new Simulation({ turbulence: 0 });
+    wound.swirl({ delta: .35, x: 0, y: 1, z: 0 });
+    const difference = () => {
+      let sum = 0;
+      for (let i = 0; i < wound.positions.length; i++) sum += (wound.positions[i]! - idle.positions[i]!) ** 2;
+      return Math.sqrt(sum / COUNT);
+    };
+    for (let tick = 0; tick < 6; tick++) { wound.step(); idle.step(); }
+    expect(difference()).toBeGreaterThan(.05);
+    for (let tick = 6; tick < HZ * 3; tick++) { wound.step(); idle.step(); }
+    expect(difference()).toBeLessThan(.025);
+  });
+
+  test('rapid wheel bursts stay bounded on ribbons and solid shapes', () => {
+    for (const form of ['silk', 'sphere', 'cube'] as const) {
+      const simulation = new Simulation({ form, turbulence: 0 });
+      for (let tick = 0; tick < HZ; tick++) {
+        if (tick < 20) for (let event = 0; event < 4; event++) simulation.swirl({ delta: .55, x: 0, y: 1, z: 0 });
+        simulation.step();
+        expect(simulation.positions.every(value => Number.isFinite(value) && Math.abs(value) < 5)).toBe(true);
+        expect(Math.abs(simulation.torsion)).toBeLessThanOrEqual(2.4);
+      }
+    }
   });
 
   test('strong forces and form changes remain bounded', () => {

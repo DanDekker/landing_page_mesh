@@ -1,4 +1,5 @@
 import { COUNT, ROWS, COLUMNS, HZ, DEFAULT_SETTINGS, IDLE_POINTER, normalizeSettings, writeShape, createEdges, isSurface, type FieldSettings, type Pointer, type WheelKick } from '../shared/field.ts';
+import { WheelMotion } from '../shared/wheel.ts';
 
 // Standalone, original browser fallback. It is independent of the optional
 // proprietary server provider. Standard mass/spring projection only.
@@ -14,8 +15,8 @@ export class Simulation {
   pointer: Pointer = { ...IDLE_POINTER };
   time = 0;
   ticks = 0;
-  torsion = 0;
-  private torsionVelocity = 0;
+  private wheel = new WheelMotion();
+  get torsion() { return this.wheel.amount; }
   private pulses: { x: number; y: number; z: number; age: number; force: number }[] = [];
 
   constructor(settings?: Partial<FieldSettings>) {
@@ -35,7 +36,7 @@ export class Simulation {
 
   reset(restartClock = true) {
     if (restartClock) { this.time = 0; this.ticks = 0; }
-    this.torsion = 0; this.torsionVelocity = 0;
+    this.wheel.reset();
     this.pulses.length = 0;
     writeShape(this.positions, this.settings.form, this.time);
     this.anchors.set(this.positions);
@@ -52,8 +53,7 @@ export class Simulation {
 
   swirl(kick: WheelKick) {
     if (![kick.delta, kick.x, kick.y, kick.z].every(Number.isFinite)) return;
-    const strength = Math.max(-.8, Math.min(.8, kick.delta)) * 1.6;
-    this.torsionVelocity = Math.max(-7, Math.min(7, this.torsionVelocity + kick.delta * 7));
+    const strength = this.wheel.kick(kick.delta) * 2.8;
     for (let i = 0; i < COUNT; i++) {
       const at = i * 3, x = this.positions[at]!, y = this.positions[at + 1]!, z = this.positions[at + 2]!;
       const twist = .25 + .75 * Math.sin(Math.floor(i / COLUMNS) / ROWS * Math.PI * 2);
@@ -77,10 +77,10 @@ export class Simulation {
     const { turbulence, tension } = this.settings;
     this.time += dt;
     this.ticks++;
-    this.torsionVelocity = (this.torsionVelocity - this.torsion * .8 * dt) * Math.exp(-dt * 1.6);
-    this.torsion = Math.max(-2.8, Math.min(2.8, this.torsion + this.torsionVelocity * dt));
+    this.wheel.step(dt);
     writeShape(this.desired, this.settings.form, this.time, this.torsion);
-    for (let i = 0; i < p.length; i++) this.anchors[i] += (this.desired[i]! - this.anchors[i]!) * .025;
+    const follow = 1 - Math.exp(-dt * this.wheel.followRate);
+    for (let i = 0; i < p.length; i++) this.anchors[i] += (this.desired[i]! - this.anchors[i]!) * follow;
     this.updateLengths();
     this.previous.set(p);
     const t = this.time * .34;
