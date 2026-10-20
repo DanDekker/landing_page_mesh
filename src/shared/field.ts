@@ -1,3 +1,5 @@
+import { SURFACE, SURFACE_GRID, SURFACE_SLOTS } from './surface.ts';
+
 export type Form = 'silk' | 'orbit' | 'wave' | 'knot' | 'sphere' | 'cube';
 export type Palette = 'alpine';
 export type FieldSettings = { form: Form; turbulence: number; tension: number; paused: boolean; palette: Palette };
@@ -6,6 +8,7 @@ export type WheelKick = { delta: number; x: number; y: number; z: number };
 export const ROWS = 192;
 export const COLUMNS = 40;
 export const COUNT = ROWS * COLUMNS;
+export const FRAME_HEADER = 3;
 export const HZ = 77;
 export const DEFAULT_SETTINGS: FieldSettings = { form: 'silk', turbulence: .32, tension: .65, paused: false, palette: 'alpine' };
 export const FORMS: Form[] = ['silk', 'orbit', 'wave', 'knot', 'sphere', 'cube'];
@@ -25,6 +28,25 @@ export function normalizeSettings(input: Partial<FieldSettings>, previous = DEFA
 
 // Original presentation geometry. No engine source or engine assets are used.
 export function writeShape(target: Float32Array, form: Form, time = 0, torsion = 0): void {
+  if (isSurface(form)) {
+    target.fill(0);
+    const middle = (SURFACE_GRID - 1) / 2;
+    for (let index = 0; index < SURFACE_SLOTS; index++) {
+      const at = index * 3;
+      let x = SURFACE.coordinates[at]! / middle, y = SURFACE.coordinates[at + 1]! / middle, z = SURFACE.coordinates[at + 2]! / middle;
+      if (form === 'sphere') {
+        const xx = x * x, yy = y * y, zz = z * z;
+        x *= 1.36 * Math.sqrt(1 - yy / 2 - zz / 2 + yy * zz / 3);
+        y *= 1.36 * Math.sqrt(1 - zz / 2 - xx / 2 + zz * xx / 3);
+        z *= 1.36 * Math.sqrt(1 - xx / 2 - yy / 2 + xx * yy / 3);
+      } else { x *= 1.04; y *= 1.04; z *= 1.04; }
+      const twist = torsion * y * .8;
+      target[at] = x * Math.cos(twist) - z * Math.sin(twist);
+      target[at + 1] = y;
+      target[at + 2] = x * Math.sin(twist) + z * Math.cos(twist);
+    }
+    return;
+  }
   const tau = Math.PI * 2;
   for (let row = 0; row < ROWS; row++) {
     const u = row / (form === 'wave' ? ROWS - 1 : ROWS) * tau;
@@ -53,24 +75,6 @@ export function writeShape(target: Float32Array, form: Form, time = 0, torsion =
         target[at] = radius * Math.cos(u * 2);
         target[at + 1] = .5 * Math.sin(u * 3) + width * Math.sin(twist);
         target[at + 2] = radius * Math.sin(u * 2);
-      } else if (isCapped(form)) {
-        let x: number, y: number, z: number;
-        if (form === 'sphere') {
-          const latitude = v * Math.PI * .5, radius = Math.cos(latitude) * 1.36;
-          x = radius * cu; y = Math.sin(latitude) * 1.36; z = radius * su;
-        } else {
-          const side = row / ROWS * 4, edge = Math.floor(side), t = (side - edge) * 2 - 1;
-          const px = edge === 0 ? 1 : edge === 1 ? -t : edge === 2 ? -1 : t;
-          const pz = edge === 0 ? t : edge === 1 ? 1 : edge === 2 ? -t : -1;
-          let radius: number;
-          radius = column <= 8 ? column / 8 : column >= 31 ? (COLUMNS - 1 - column) / 8 : 1;
-          y = column <= 8 ? -1.04 : column >= 31 ? 1.04 : (column - 8) / 23 * 2.08 - 1.04;
-          x = px * radius * 1.04; z = pz * radius * 1.04;
-        }
-        const twist = torsion * y * .8;
-        target[at] = x * Math.cos(twist) - z * Math.sin(twist);
-        target[at + 1] = y;
-        target[at + 2] = x * Math.sin(twist) + z * Math.cos(twist);
       } else {
         const a = (row / (ROWS - 1) * 2 - 1) * 2.25;
         const b = v * 1.18;
@@ -84,12 +88,22 @@ export function writeShape(target: Float32Array, form: Form, time = 0, torsion =
   }
 }
 
-export function isCapped(form: Form) { return form === 'sphere' || form === 'cube'; }
+export function isSurface(form: Form) { return form === 'sphere' || form === 'cube'; }
+
+export function textureCoordinates(form: Form): Float32Array {
+  const uv = new Float32Array(COUNT * 2);
+  if (isSurface(form)) uv.set(SURFACE.uv);
+  else for (let index = 0; index < COUNT; index++) {
+    uv[index * 2] = Math.floor(index / COLUMNS) / (ROWS - 1);
+    uv[index * 2 + 1] = (index % COLUMNS) / (COLUMNS - 1);
+  }
+  return uv;
+}
 
 export function pointIndices(form: Form): Uint16Array {
+  if (isSurface(form)) return SURFACE.points.slice();
   const indices: number[] = [];
   for (let row = 0; row < ROWS; row++) for (let column = 0; column < COLUMNS; column++) {
-    if (isCapped(form) && row > 0 && (column === 0 || column === COLUMNS - 1)) continue;
     indices.push(row * COLUMNS + column);
   }
   return new Uint16Array(indices);
@@ -98,22 +112,20 @@ export function pointIndices(form: Form): Uint16Array {
 export function gridIndex(form: Form, row: number, column: number): number {
   const r = form === 'wave' ? Math.max(0, Math.min(ROWS - 1, row)) : (row + ROWS) % ROWS;
   const c = form === 'orbit' ? (column + COLUMNS) % COLUMNS : Math.max(0, Math.min(COLUMNS - 1, column));
-  if (isCapped(form) && (c === 0 || c === COLUMNS - 1)) return c;
   return r * COLUMNS + c;
 }
 
 export function createEdges(form: Form = 'silk'): Uint16Array {
+  if (isSurface(form)) return SURFACE.edges.slice();
   const edges: number[] = [];
   for (let row = 0; row < ROWS; row++) {
     for (let column = 0; column < COLUMNS; column++) {
       const i = row * COLUMNS + column;
-      if (isCapped(form) && column === 0) { edges.push(0, row * COLUMNS + 1); continue; }
-      if (isCapped(form) && column === COLUMNS - 1) continue;
       const nextRow = row + 1 < ROWS || form !== 'wave';
       const nextColumn = column + 1 < COLUMNS || form === 'orbit';
       if (nextRow) edges.push(i, gridIndex(form, row + 1, column));
       if (nextColumn) edges.push(i, gridIndex(form, row, column + 1));
-      if (nextRow && nextColumn && (!isCapped(form) || column < COLUMNS - 2) && (row + column) % 2 === 0) edges.push(i, gridIndex(form, row + 1, column + 1));
+      if (nextRow && nextColumn && (row + column) % 2 === 0) edges.push(i, gridIndex(form, row + 1, column + 1));
     }
   }
   return new Uint16Array(edges);

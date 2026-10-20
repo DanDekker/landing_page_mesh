@@ -1,4 +1,5 @@
-import { COUNT, COLUMNS, ROWS, createEdges, gridIndex, writeShape, isCapped, pointIndices, type Form, type Palette, type Pointer } from '../shared/field.ts';
+import { COUNT, COLUMNS, createEdges, gridIndex, writeShape, isSurface, pointIndices, textureCoordinates, type Form, type Palette, type Pointer } from '../shared/field.ts';
+import { SURFACE, SURFACE_SLOTS } from '../shared/surface.ts';
 import { fit, project, unproject, inverseRotate, type View } from './camera.ts';
 
 const VERTEX = `#version 300 es
@@ -18,7 +19,7 @@ uniform vec2 uCenter;
 uniform vec3 uPointer;
 uniform float uContact;
 uniform float uEnergy;
-uniform float uCapped;
+uniform float uSurface;
 out vec3 vColor;
 out float vAlpha;
 vec3 rotate(vec3 p) {
@@ -36,8 +37,9 @@ void main() {
   float depth=clamp(1.-(p.z+2.4)/5.,.12,1.);
   float facing=pow(abs(dot(n,normalize(vec3(-.25,.6,1.)))),4.);
   float rim=pow(1.-abs(n.z),3.);
-  float edge=pow(abs(aUV.y*2.-1.),8.);
-  float thread=.5+.5*sin(aUV.x*6.28318*3.+cos(aUV.y*6.28318)*.65);
+  float edge=pow(abs(aUV.y*2.-1.),8.)*(1.-uSurface);
+  float phase=mix(aUV.x*6.28318*3.+cos(aUV.y*6.28318)*.65,dot(aPosition,vec3(3.,2.,1.5)),uSurface);
+  float thread=.5+.5*sin(phase);
   float contact=exp(-dot(aPosition-uPointer,aPosition-uPointer)*8.)*uContact;
   float charge=clamp(aStress*.8+contact*.6,0.,1.);
   float light=.3+depth*.6+facing*.7+rim*.5+edge*.2;
@@ -45,7 +47,6 @@ void main() {
   vec3 highlight=mix(uColor,vec3(.81,1.,.88),.75);
   vColor=mix(warm,highlight,clamp(pow(facing,2.)*.4+edge*.1+charge*.7,0.,1.))*(light+charge*.8+uEnergy*.3);
   vAlpha=(.3+depth*.7)*(1.-uDust*.91);
-  if(uCapped>.5) vAlpha*=sqrt(max(.08,sin(aUV.y*3.14159265)));
   gl_PointSize=(1.25+depth*.7+facing*.5+edge*.35+charge*1.4)*uDpr*perspective;
   if(uDust>.5) { vColor=uColor*.45;vAlpha*=.3+.7*aUV.y;gl_PointSize=(.6+aUV.x*.7)*uDpr; }
 }`;
@@ -126,6 +127,7 @@ export class FieldRenderer {
   private dustVAO: WebGLVertexArrayObject;
   private positionBuffer: WebGLBuffer;
   private normalBuffer: WebGLBuffer;
+  private uvBuffer: WebGLBuffer;
   private stressBuffer: WebGLBuffer;
   private edgeCount: number;
   private edgeBuffer: WebGLBuffer;
@@ -134,6 +136,7 @@ export class FieldRenderer {
   private form: Form = 'silk';
   private normals = new Float32Array(COUNT * 3);
   private stresses = new Float32Array(COUNT);
+  private strain = new Float32Array(COUNT);
   private reference = new Float32Array(COUNT * 3);
   private currentPositions?: Float32Array;
   private scene?: Target;
@@ -174,9 +177,7 @@ export class FieldRenderer {
     this.positionBuffer = this.attribute(0, new Float32Array(COUNT * 3), 3, gl.DYNAMIC_DRAW);
     this.normalBuffer = this.attribute(1, this.normals, 3, gl.DYNAMIC_DRAW);
     this.stressBuffer = this.attribute(3, this.stresses, 1, gl.DYNAMIC_DRAW);
-    const uv = new Float32Array(COUNT * 2);
-    for (let i = 0; i < COUNT; i++) { uv[i * 2] = Math.floor(i / COLUMNS) / (ROWS - 1); uv[i * 2 + 1] = (i % COLUMNS) / (COLUMNS - 1); }
-    this.attribute(2, uv, 2, gl.STATIC_DRAW);
+    this.uvBuffer = this.attribute(2, textureCoordinates('silk'), 2, gl.STATIC_DRAW);
     const edges = createEdges();
     const index = gl.createBuffer()!; this.buffers.push(index); this.edgeBuffer = index;
     gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, index);
@@ -275,27 +276,34 @@ export class FieldRenderer {
     gl.bindVertexArray(this.meshVAO); gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.pointBuffer);
     gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, this.pointList, gl.STATIC_DRAW);
     gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.edgeBuffer); gl.bindVertexArray(null);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.uvBuffer); gl.bufferData(gl.ARRAY_BUFFER, textureCoordinates(form), gl.STATIC_DRAW);
+    this.stresses.fill(0);
   }
 
   private geometry(positions: Float32Array) {
     const gl = this.gl;
-    for (let row = 0; row < ROWS; row++) {
-      for (let column = 0; column < COLUMNS; column++) {
-        const a = (row * COLUMNS + column) * 3;
-        if (isCapped(this.form) && (column === 0 || column === COLUMNS - 1)) {
-          this.normals[a] = 0; this.normals[a + 1] = column === 0 ? -1 : 1; this.normals[a + 2] = 0; this.stresses[row * COLUMNS + column] = 0; continue;
-        }
-        const x0 = gridIndex(this.form, row - 1, column) * 3, x1 = gridIndex(this.form, row + 1, column) * 3;
-        const y0 = gridIndex(this.form, row, column - 1) * 3, y1 = gridIndex(this.form, row, column + 1) * 3;
-        const ax = positions[x1]! - positions[x0]!, ay = positions[x1 + 1]! - positions[x0 + 1]!, az = positions[x1 + 2]! - positions[x0 + 2]!;
-        const bx = positions[y1]! - positions[y0]!, by = positions[y1 + 1]! - positions[y0 + 1]!, bz = positions[y1 + 2]! - positions[y0 + 2]!;
-        const nx = ay * bz - az * by, ny = az * bx - ax * bz, nz = ax * by - ay * bx;
-        const length = Math.hypot(nx, ny, nz) || 1;
-        this.normals[a] = nx / length; this.normals[a + 1] = ny / length; this.normals[a + 2] = nz / length;
-        const referenceLength = Math.hypot(this.reference[x1]! - this.reference[x0]!, this.reference[x1 + 1]! - this.reference[x0 + 1]!, this.reference[x1 + 2]! - this.reference[x0 + 2]!) + 1e-5;
-        const stretch = Math.min(1, Math.abs(Math.hypot(ax, ay, az) / referenceLength - 1) * 1.4);
-        this.stresses[row * COLUMNS + column] += (stretch - this.stresses[row * COLUMNS + column]!) * .17;
-      }
+    const surface = isSurface(this.form), count = surface ? SURFACE_SLOTS : COUNT;
+    this.normals.fill(0); this.strain.fill(0);
+    for (let slot = 0; slot < count; slot++) {
+      const index = surface ? SURFACE.canonical[slot]! : slot, a = index * 3;
+      const row = Math.floor(slot / COLUMNS), column = slot % COLUMNS, neighbors = slot * 4;
+      const x0 = (surface ? SURFACE.neighbors[neighbors]! : gridIndex(this.form, row - 1, column)) * 3;
+      const x1 = (surface ? SURFACE.neighbors[neighbors + 1]! : gridIndex(this.form, row + 1, column)) * 3;
+      const y0 = (surface ? SURFACE.neighbors[neighbors + 2]! : gridIndex(this.form, row, column - 1)) * 3;
+      const y1 = (surface ? SURFACE.neighbors[neighbors + 3]! : gridIndex(this.form, row, column + 1)) * 3;
+      const ax = positions[x1]! - positions[x0]!, ay = positions[x1 + 1]! - positions[x0 + 1]!, az = positions[x1 + 2]! - positions[x0 + 2]!;
+      const bx = positions[y1]! - positions[y0]!, by = positions[y1 + 1]! - positions[y0 + 1]!, bz = positions[y1 + 2]! - positions[y0 + 2]!;
+      const nx = ay * bz - az * by, ny = az * bx - ax * bz, nz = ax * by - ay * bx;
+      const length = Math.hypot(nx, ny, nz) || 1;
+      this.normals[a] += nx / length; this.normals[a + 1] += ny / length; this.normals[a + 2] += nz / length;
+      const referenceLength = Math.hypot(this.reference[x1]! - this.reference[x0]!, this.reference[x1 + 1]! - this.reference[x0 + 1]!, this.reference[x1 + 2]! - this.reference[x0 + 2]!) + 1e-5;
+      const stretch = Math.min(1, Math.abs(Math.hypot(ax, ay, az) / referenceLength - 1) * 1.4);
+      this.strain[index] = Math.max(this.strain[index]!, stretch);
+    }
+    for (const index of this.pointList) {
+      const at = index * 3, length = Math.hypot(this.normals[at]!, this.normals[at + 1]!, this.normals[at + 2]!) || 1;
+      this.normals[at] /= length; this.normals[at + 1] /= length; this.normals[at + 2] /= length;
+      this.stresses[index] += (this.strain[index]! - this.stresses[index]!) * .17;
     }
     gl.bindBuffer(gl.ARRAY_BUFFER, this.positionBuffer); gl.bufferSubData(gl.ARRAY_BUFFER, 0, positions);
     gl.bindBuffer(gl.ARRAY_BUFFER, this.normalBuffer); gl.bufferSubData(gl.ARRAY_BUFFER, 0, this.normals);
@@ -310,7 +318,7 @@ export class FieldRenderer {
     gl.uniform2f(this.uniform(program, 'uCenter'), this.center[0]!, this.center[1]!);
     gl.uniform3f(this.uniform(program, 'uPointer'), this.contact.x, this.contact.y, this.contact.z);
     gl.uniform1f(this.uniform(program, 'uContact'), this.contactStrength); gl.uniform1f(this.uniform(program, 'uEnergy'), this.wheelEnergy);
-    gl.uniform1f(this.uniform(program, 'uCapped'), dust ? 0 : isCapped(this.form) ? 1 : 0);
+    gl.uniform1f(this.uniform(program, 'uSurface'), dust ? 0 : isSurface(this.form) ? 1 : 0);
     gl.uniform1f(this.uniform(program, 'uDpr'), this.dpr); gl.uniform1f(this.uniform(program, 'uTime'), time); gl.uniform1f(this.uniform(program, 'uDust'), dust);
   }
 

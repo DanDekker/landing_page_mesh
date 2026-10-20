@@ -1,4 +1,4 @@
-import { COUNT, ROWS, COLUMNS, HZ, DEFAULT_SETTINGS, IDLE_POINTER, normalizeSettings, writeShape, createEdges, type FieldSettings, type Pointer, type WheelKick } from '../shared/field.ts';
+import { COUNT, ROWS, COLUMNS, HZ, DEFAULT_SETTINGS, IDLE_POINTER, normalizeSettings, writeShape, createEdges, isSurface, type FieldSettings, type Pointer, type WheelKick } from '../shared/field.ts';
 
 // Standalone, original browser fallback. It is independent of the optional
 // proprietary server provider. Standard mass/spring projection only.
@@ -29,17 +29,15 @@ export class Simulation {
     if (previousForm !== this.settings.form) {
       this.edges = createEdges(this.settings.form);
       this.lengths = new Float32Array(this.edges.length / 2);
-      if (this.settings.paused) this.reset();
-      else this.updateLengths();
+      this.reset(false);
     }
   }
 
-  reset() {
-    this.time = 0;
-    this.ticks = 0;
+  reset(restartClock = true) {
+    if (restartClock) { this.time = 0; this.ticks = 0; }
     this.torsion = 0; this.torsionVelocity = 0;
     this.pulses.length = 0;
-    writeShape(this.positions, this.settings.form);
+    writeShape(this.positions, this.settings.form, this.time);
     this.anchors.set(this.positions);
     this.desired.set(this.positions);
     this.velocities.fill(0);
@@ -99,8 +97,11 @@ export class Simulation {
         let dc = Math.abs(i % COLUMNS - grabbed % COLUMNS);
         if (this.settings.form !== 'wave') dr = Math.min(dr, ROWS - dr);
         if (this.settings.form === 'orbit') dc = Math.min(dc, COLUMNS - dc);
-        const weight = Math.exp(-(dr * dr / 55 + dc * dc / 13)) * 180;
         const anchor = grabbed * 3;
+        const distance = isSurface(this.settings.form)
+          ? ((this.anchors[a]! - this.anchors[anchor]!) ** 2 + (this.anchors[a + 1]! - this.anchors[anchor + 1]!) ** 2 + (this.anchors[a + 2]! - this.anchors[anchor + 2]!) ** 2) / .14
+          : dr * dr / 55 + dc * dc / 13;
+        const weight = Math.exp(-distance) * 180;
         fx += (this.anchors[a]! + this.pointer.x - this.anchors[anchor]! - x) * weight;
         fy += (this.anchors[a + 1]! + this.pointer.y - this.anchors[anchor + 1]! - y) * weight;
         fz += (this.anchors[a + 2]! + this.pointer.z - this.anchors[anchor + 2]! - z) * weight;

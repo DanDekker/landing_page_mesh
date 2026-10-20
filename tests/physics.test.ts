@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { Simulation } from '../src/physics/simulation.ts';
 import { COUNT, ROWS, COLUMNS, FORMS, HZ, createEdges, pointIndices, normalizeSettings, writeShape } from '../src/shared/field.ts';
+import { SURFACE_GRID, SURFACE_SLOTS } from '../src/shared/surface.ts';
 
 describe('field geometry', () => {
   test('all forms fit the same valid topology', () => {
@@ -31,18 +32,37 @@ describe('field geometry', () => {
     }
   });
 
-  test('closed caps share one visible vertex and contain no disconnected or collapsed edges', () => {
+  test('sphere and cube have welded faces without crowded poles or disconnected edges', () => {
+    expect(SURFACE_SLOTS).toBeLessThanOrEqual(COUNT);
     for (const form of ['sphere', 'cube'] as const) {
       const points = pointIndices(form), active = new Set(points), edges = createEdges(form);
-      let lower = 0, upper = 0;
-      expect(points.length).toBe(ROWS * (COLUMNS - 2) + 2);
+      const positions = new Float32Array(COUNT * 3); writeShape(positions, form);
+      const connections = new Set<number>(), neighbors = new Map<number, number[]>();
+      const coordinates = new Set<string>();
+      expect(points.length).toBe(6 * (SURFACE_GRID - 1) ** 2 + 2);
+      for (const index of points) coordinates.add(Array.from(positions.subarray(index * 3, index * 3 + 3)).join(','));
+      expect(coordinates.size).toBe(points.length);
+      let shortest = Infinity, longest = 0;
       for (let edge = 0; edge < edges.length; edge += 2) {
         const a = edges[edge]!, b = edges[edge + 1]!;
         expect(active.has(a) && active.has(b)).toBe(true); expect(a).not.toBe(b);
-        if (a === 0 || b === 0) lower++;
-        if (a === COLUMNS - 1 || b === COLUMNS - 1) upper++;
+        const key = Math.min(a, b) * COUNT + Math.max(a, b);
+        expect(connections.has(key)).toBe(false); connections.add(key);
+        if (!neighbors.has(a)) neighbors.set(a, []);
+        if (!neighbors.has(b)) neighbors.set(b, []);
+        neighbors.get(a)!.push(b); neighbors.get(b)!.push(a);
+        const length = Math.hypot(positions[a * 3]! - positions[b * 3]!, positions[a * 3 + 1]! - positions[b * 3 + 1]!, positions[a * 3 + 2]! - positions[b * 3 + 2]!);
+        shortest = Math.min(shortest, length); longest = Math.max(longest, length);
       }
-      expect(lower).toBe(ROWS); expect(upper).toBe(ROWS);
+      expect(shortest).toBeGreaterThan(.04); expect(longest / shortest).toBeLessThan(2.1);
+      expect(Math.max(...Array.from(neighbors.values(), list => list.length))).toBeLessThanOrEqual(8);
+      const visited = new Set<number>(), queue = [points[0]!];
+      while (queue.length) {
+        const index = queue.pop()!;
+        if (visited.has(index)) continue;
+        visited.add(index); queue.push(...neighbors.get(index)!);
+      }
+      expect(visited.size).toBe(active.size);
     }
   });
 
@@ -87,6 +107,25 @@ describe('standalone simulation', () => {
     const expected = new Float32Array(COUNT * 3); writeShape(expected, 'orbit');
     expect(simulation.positions).toEqual(expected);
     expect(simulation.settings.paused).toBe(true);
+  });
+
+  test('switching shapes clears old folds and twist without resetting the clock', () => {
+    const simulation = new Simulation({ turbulence: 0 });
+    for (const form of ['sphere', 'cube'] as const) {
+      simulation.swirl({ delta: .35, x: 0, y: 1, z: 0 });
+      simulation.pulse(.8, .2, 0);
+      for (let tick = 0; tick < HZ; tick++) simulation.step();
+      const time = simulation.time;
+      simulation.configure({ form });
+      expect(simulation.time).toBe(time); expect(simulation.torsion).toBe(0);
+      expect(simulation.velocities.every(value => value === 0)).toBe(true);
+      const expected = new Float32Array(COUNT * 3); writeShape(expected, form, time);
+      expect(simulation.positions).toEqual(expected);
+      for (let tick = 0; tick < HZ * 2; tick++) simulation.step();
+      let error = 0;
+      for (const index of pointIndices(form)) for (let axis = 0; axis < 3; axis++) error = Math.max(error, Math.abs(simulation.positions[index * 3 + axis]! - expected[index * 3 + axis]!));
+      expect(error).toBeLessThan(.0001);
+    }
   });
 
   test('pointer impulses move the mesh and reset restores it', () => {
