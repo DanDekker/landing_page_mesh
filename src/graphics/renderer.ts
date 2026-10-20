@@ -1,6 +1,8 @@
-import { COUNT, COLUMNS, createEdges, gridIndex, writeShape, isSurface, pointIndices, textureCoordinates, type Form, type Palette, type Pointer } from '../shared/field.ts';
+import { COUNT, COLUMNS, createEdges, gridIndex, isSurface, pointIndices, textureCoordinates, type Form, type Palette, type Pointer } from '../shared/field.ts';
 import { SURFACE, SURFACE_SLOTS } from '../shared/surface.ts';
-import { fit, project, unproject, inverseRotate, type View } from './camera.ts';
+import { project, inverseRotate } from './camera.ts';
+import { FieldCamera } from './field-camera.ts';
+import { SurfaceGrab } from './grab.ts';
 
 const VERTEX = `#version 300 es
 precision highp float;
@@ -137,7 +139,8 @@ export class FieldRenderer {
   private normals = new Float32Array(COUNT * 3);
   private stresses = new Float32Array(COUNT);
   private strain = new Float32Array(COUNT);
-  private reference = new Float32Array(COUNT * 3);
+  private camera = new FieldCamera();
+  private get reference() { return this.camera.reference; }
   private currentPositions?: Float32Array;
   private scene?: Target;
   private bloomA?: Target;
@@ -146,14 +149,6 @@ export class FieldRenderer {
   private width = 1;
   private height = 1;
   private aspect = 1;
-  private scale = .65;
-  private rotation = [.86, .12, -.31];
-  private center = [0, .035];
-  private fitted = false;
-  private cameraTime = 0;
-  private lastTime = 0;
-  private zoom = 1;
-  private zoomVelocity = 0;
   private wheelEnergy = 0;
   private contact: Pointer = { x: 0, y: 0, z: 0, active: false, down: false };
   private contactStrength = 0;
@@ -249,7 +244,7 @@ export class FieldRenderer {
     const w = Math.round(this.width * this.dpr), h = Math.round(this.height * this.dpr);
     if (this.canvas.width === w && this.canvas.height === h && this.scene) return;
     this.canvas.width = w; this.canvas.height = h;
-    this.fitted = false;
+    this.camera.resize(this.aspect);
     this.deleteTarget(this.scene); this.deleteTarget(this.bloomA); this.deleteTarget(this.bloomB);
     this.scene = this.target(w, h);
     this.bloomA = this.target(Math.max(1, Math.floor(w / 3)), Math.max(1, Math.floor(h / 3)));
@@ -260,11 +255,11 @@ export class FieldRenderer {
 
   touch(pointer: Pointer) { this.contact = { ...pointer }; }
 
-  wheel(delta: number) { this.zoomVelocity += delta * .25; this.wheelEnergy = Math.min(1, this.wheelEnergy + Math.abs(delta) * 1.5); }
+  wheel(delta: number) { this.wheelEnergy = Math.min(1, this.wheelEnergy + Math.abs(delta) * 1.5); }
 
-  axis() { return inverseRotate({ x: 0, y: 0, z: 1 }, this.rotation); }
+  axis() { return inverseRotate({ x: 0, y: 0, z: 1 }, this.view.rotation); }
 
-  private get view(): View { return { rotation: this.rotation, scale: this.scale * this.zoom, aspect: this.aspect, center: this.center }; }
+  private get view() { return this.camera.view; }
 
   topology(form: Form) {
     if (this.form === form) return;
@@ -312,10 +307,11 @@ export class FieldRenderer {
 
   private meshUniforms(program: WebGLProgram, time: number, dust: number) {
     const gl = this.gl; gl.useProgram(program);
-    gl.uniform3f(this.uniform(program, 'uRotation'), this.rotation[0]!, this.rotation[1]!, this.rotation[2]!);
+    const { rotation, scale, center } = this.view;
+    gl.uniform3f(this.uniform(program, 'uRotation'), rotation[0]!, rotation[1]!, rotation[2]!);
     gl.uniform3f(this.uniform(program, 'uColor'), this.color[0]!, this.color[1]!, this.color[2]!);
-    gl.uniform1f(this.uniform(program, 'uScale'), this.scale * this.zoom); gl.uniform1f(this.uniform(program, 'uAspect'), this.aspect);
-    gl.uniform2f(this.uniform(program, 'uCenter'), this.center[0]!, this.center[1]!);
+    gl.uniform1f(this.uniform(program, 'uScale'), scale); gl.uniform1f(this.uniform(program, 'uAspect'), this.aspect);
+    gl.uniform2f(this.uniform(program, 'uCenter'), center[0]!, center[1]!);
     gl.uniform3f(this.uniform(program, 'uPointer'), this.contact.x, this.contact.y, this.contact.z);
     gl.uniform1f(this.uniform(program, 'uContact'), this.contactStrength); gl.uniform1f(this.uniform(program, 'uEnergy'), this.wheelEnergy);
     gl.uniform1f(this.uniform(program, 'uSurface'), dust ? 0 : isSurface(this.form) ? 1 : 0);
@@ -332,19 +328,7 @@ export class FieldRenderer {
     if (!this.scene || !this.bloomA || !this.bloomB) return;
     const gl = this.gl;
     for (let i = 0; i < 3; i++) this.color[i] += (this.goalColor[i]! - this.color[i]!) * Math.min(1, delta * 3);
-    if (time < this.lastTime - .2) this.cameraTime = 0;
-    if (!this.contact.down) this.cameraTime += Math.max(0, Math.min(.1, time - this.lastTime));
-    this.lastTime = time;
-    this.rotation = [.86 + Math.sin(this.cameraTime * .055) * .17, .12 + this.cameraTime * .045, -.31 + Math.sin(this.cameraTime * .04) * .13];
-    writeShape(this.reference, this.form, time);
-    const framing = fit(positions, this.rotation, this.aspect), framingBlend = this.fitted ? 1 - Math.exp(-delta * 2.5) : 1;
-    if (!this.contact.down || !this.fitted) {
-      this.scale += (framing.scale - this.scale) * framingBlend;
-      for (let i = 0; i < 2; i++) this.center[i] += (framing.center[i]! - this.center[i]!) * framingBlend;
-      this.fitted = true;
-    }
-    this.zoomVelocity += (1 - this.zoom) * delta * 24; this.zoomVelocity *= Math.exp(-delta * 5.5);
-    this.zoom = Math.max(.86, Math.min(1.16, this.zoom + this.zoomVelocity * delta));
+    this.camera.update(this.form, time, delta, this.contact.down);
     this.wheelEnergy *= Math.exp(-delta * 2.4);
     this.contactStrength += ((this.contact.active ? (this.contact.down ? 1 : .35) : 0) - this.contactStrength) * (1 - Math.exp(-delta * 14));
     this.currentPositions = positions;
@@ -376,25 +360,27 @@ export class FieldRenderer {
     if (!this.currentPositions) return null;
     const bounds = this.canvas.getBoundingClientRect(), x = clientX - bounds.left, y = clientY - bounds.top;
     let best = 42 * 42, selected = -1;
-    const [pitch, yaw, roll] = this.rotation;
+    const { rotation, scale, center } = this.view;
+    const [pitch, yaw, roll] = rotation;
     const cx = Math.cos(pitch!), sx = Math.sin(pitch!), cy = Math.cos(yaw!), sy = Math.sin(yaw!), cz = Math.cos(roll!), sz = Math.sin(roll!);
-    const scale = this.scale * this.zoom, positions = this.currentPositions;
+    const positions = this.currentPositions;
     for (const index of this.pointList) {
       const at = index * 3, px = positions[at]!, py = positions[at + 1]!, pz = positions[at + 2]!;
       const ry = cx * py - sx * pz, rz = sx * py + cx * pz, rx = cy * px + sy * rz, depth = -sy * px + cy * rz;
       const perspective = 5.5 / (5.5 + depth);
-      const dx = ((cz * rx - sz * ry) * scale * perspective / this.aspect + this.center[0]! + 1) * this.width * .5 - x;
-      const dy = (1 - ((sz * rx + cz * ry) * scale * perspective + this.center[1]!)) * this.height * .5 - y;
+      const dx = ((cz * rx - sz * ry) * scale * perspective / this.aspect + center[0]! + 1) * this.width * .5 - x;
+      const dy = (1 - ((sz * rx + cz * ry) * scale * perspective + center[1]!)) * this.height * .5 - y;
       const score = dx * dx + dy * dy + (depth + 3) * 16;
       if (score < best) { best = score; selected = index; }
     }
     return selected >= 0 ? this.point(selected) : null;
   }
 
-  pointer(clientX: number, clientY: number, depth = 0): Pointer {
+  grab(clientX: number, clientY: number) {
+    const hit = this.pick(clientX, clientY);
+    if (!hit) return null;
     const bounds = this.canvas.getBoundingClientRect();
-    const point = unproject((clientX - bounds.left) / this.width * 2 - 1, 1 - (clientY - bounds.top) / this.height * 2, depth, this.view);
-    return { ...point, active: true, down: false };
+    return new SurfaceGrab(hit, hit.index, clientX, clientY, this.view, { left: bounds.left, top: bounds.top, width: this.width, height: this.height });
   }
 
   dispose() {

@@ -1,4 +1,5 @@
 import { FieldRenderer } from '../graphics/renderer.ts';
+import type { SurfaceGrab } from '../graphics/grab.ts';
 import { COUNT, FRAME_HEADER, FORMS, DEFAULT_SETTINGS, IDLE_POINTER, writeShape, normalizeSettings, type FieldSettings, type Form, type Pointer } from '../shared/field.ts';
 
 export class ParticleField extends HTMLElement {
@@ -22,7 +23,8 @@ export class ParticleField extends HTMLElement {
   private feedback?: SVGSVGElement;
   private screen = { x: 0, y: 0 };
   private press = { x: 0, y: 0 };
-  private dragDepth = 0;
+  private grab?: SurfaceGrab;
+  private capturedPointer?: number;
   private travel = 0;
   private pressed = false;
 
@@ -43,7 +45,7 @@ export class ParticleField extends HTMLElement {
     writeShape(this.target, this.settings.form); this.displayed.set(this.target);
     try { this.renderer = new FieldRenderer(this.canvas); }
     catch (error) { this.failure(error); return; }
-    this.canvas.addEventListener('webglcontextlost', event => { event.preventDefault(); cancelAnimationFrame(this.raf); this.raf = 0; }, { signal });
+    this.canvas.addEventListener('webglcontextlost', event => { event.preventDefault(); this.clearContact(); cancelAnimationFrame(this.raf); this.raf = 0; }, { signal });
     this.canvas.addEventListener('webglcontextrestored', () => {
       try { this.renderer?.dispose(); this.renderer = new FieldRenderer(this.canvas!); this.resize(); this.renderer.palette(this.settings.palette); this.renderer.topology(this.settings.form); this.requestFrame(); }
       catch (error) { this.failure(error); }
@@ -53,8 +55,8 @@ export class ParticleField extends HTMLElement {
       if (!this.renderer || !event.isPrimary) return;
       const bounds = this.getBoundingClientRect(); this.screen = { x: event.clientX - bounds.left, y: event.clientY - bounds.top };
       if (this.pressed) this.travel = Math.max(this.travel, Math.hypot(event.clientX - this.press.x, event.clientY - this.press.y));
-      if (this.pointer.down) {
-        this.pointer = { ...this.renderer.pointer(event.clientX, event.clientY, this.dragDepth), down: true, index: this.pointer.index };
+      if (this.grab) {
+        this.pointer = this.grab.move(event.clientX, event.clientY);
       } else {
         const hit = this.renderer.pick(event.clientX, event.clientY);
         this.pointer = hit ? { x: hit.x, y: hit.y, z: hit.z, active: true, down: false, index: hit.index } : { ...IDLE_POINTER };
@@ -63,23 +65,22 @@ export class ParticleField extends HTMLElement {
     }, { signal });
     this.addEventListener('pointerdown', event => {
       if (event.button !== 0 || !this.renderer || !event.isPrimary) return;
+      const grab = this.renderer.grab(event.clientX, event.clientY);
+      if (!grab) { this.clearContact(); return; }
+      this.grab = grab; this.capturedPointer = event.pointerId;
       this.setPointerCapture(event.pointerId);
       const bounds = this.getBoundingClientRect(); this.screen = { x: event.clientX - bounds.left, y: event.clientY - bounds.top };
-      const hit = this.renderer.pick(event.clientX, event.clientY);
-      this.dragDepth = hit?.depth ?? 0; this.travel = 0; this.pressed = true; this.press = { x: event.clientX, y: event.clientY };
-      this.pointer = hit ? { x: hit.x, y: hit.y, z: hit.z, active: true, down: true, index: hit.index } : { ...this.renderer.pointer(event.clientX, event.clientY), index: -1, down: false };
+      this.travel = 0; this.pressed = true; this.press = { x: event.clientX, y: event.clientY };
+      this.pointer = grab.move(event.clientX, event.clientY);
       this.updateContact();
     }, { signal });
     const release = (event: PointerEvent) => {
-      if (!event.isPrimary) return;
+      if (!event.isPrimary || event.pointerId !== this.capturedPointer) return;
       if (event.type === 'pointerup' && this.pressed && this.travel < 5 && !this.settings.paused) this.send({ type: 'pulse', x: this.pointer.x, y: this.pointer.y, z: this.pointer.z });
-      this.pressed = false;
-      this.pointer = { ...this.pointer, down: false, active: event.pointerType === 'mouse' && event.type !== 'pointercancel' };
-      this.updateContact();
-      if (this.hasPointerCapture(event.pointerId)) this.releasePointerCapture(event.pointerId);
+      this.clearContact();
     };
     this.addEventListener('pointerup', release, { signal }); this.addEventListener('pointercancel', release, { signal });
-    this.addEventListener('lostpointercapture', () => { this.pressed = false; this.pointer.down = false; this.updateContact(); }, { signal });
+    this.addEventListener('lostpointercapture', event => { if (event.pointerId === this.capturedPointer) this.clearContact(); }, { signal });
     this.addEventListener('pointerleave', () => { if (!this.pointer.down) { this.pointer.active = false; this.updateContact(); } }, { signal });
     this.addEventListener('wheel', event => {
       event.preventDefault();
@@ -89,10 +90,10 @@ export class ParticleField extends HTMLElement {
       const axis = this.renderer.axis();
       this.send({ type: 'wheel', kick: { delta, ...axis } }); this.renderer.wheel(delta); this.requestFrame();
     }, { signal, passive: false });
-    window.addEventListener('blur', () => { this.pressed = false; this.pointer = { ...IDLE_POINTER }; this.updateContact(); }, { signal });
+    window.addEventListener('blur', () => this.clearContact(), { signal });
     document.addEventListener('visibilitychange', () => {
       this.send({ type: 'visibility', visible: !document.hidden });
-      if (document.hidden) { this.pointer = { ...IDLE_POINTER }; this.updateContact(); cancelAnimationFrame(this.raf); this.raf = 0; }
+      if (document.hidden) { this.clearContact(); cancelAnimationFrame(this.raf); this.raf = 0; }
       else { this.previous = 0; this.requestFrame(); }
     }, { signal });
     this.startWorker(); this.connectPrivate(signal); this.resize();
@@ -108,7 +109,7 @@ export class ParticleField extends HTMLElement {
     const previousForm = this.settings.form;
     this.settings = normalizeSettings(input, this.settings);
     if (previousForm !== this.settings.form) {
-      this.pressed = false; this.pointer = { ...IDLE_POINTER }; this.updateContact();
+      this.clearContact();
       writeShape(this.target, this.settings.form, this.displayedTime); this.displayed.set(this.target);
     }
     this.renderer?.palette(this.settings.palette);
@@ -116,7 +117,14 @@ export class ParticleField extends HTMLElement {
     this.send({ type: 'settings', settings: this.settings }); this.requestFrame();
   }
 
-  reset() { this.send({ type: 'reset' }); this.requestFrame(); }
+  reset() { this.clearContact(); this.send({ type: 'reset' }); this.requestFrame(); }
+
+  private clearContact() {
+    const captured = this.capturedPointer;
+    this.capturedPointer = undefined; this.grab = undefined; this.pressed = false;
+    this.pointer = { ...IDLE_POINTER }; this.updateContact();
+    if (captured !== undefined && this.hasPointerCapture(captured)) this.releasePointerCapture(captured);
+  }
 
   private updateContact() {
     this.renderer?.touch(this.pointer); this.style.cursor = this.pointer.down ? 'grabbing' : this.pointer.active ? 'grab' : '';
@@ -192,7 +200,7 @@ export class ParticleField extends HTMLElement {
     this.target = positions; this.targetTime = time; this.requestFrame();
   }
 
-  private resize() { if (this.renderer) { this.renderer.resize(this.clientWidth, this.clientHeight); this.feedback?.setAttribute('viewBox', `0 0 ${this.clientWidth} ${this.clientHeight}`); this.requestFrame(); } }
+  private resize() { if (this.renderer) { if (this.grab) this.clearContact(); this.renderer.resize(this.clientWidth, this.clientHeight); this.feedback?.setAttribute('viewBox', `0 0 ${this.clientWidth} ${this.clientHeight}`); this.requestFrame(); } }
 
   private requestFrame() {
     this.dirtyUntil = performance.now() + 1000;
