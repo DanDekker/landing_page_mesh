@@ -1,5 +1,5 @@
 import { FieldRenderer } from '../graphics/renderer.ts';
-import { COUNT, DEFAULT_SETTINGS, IDLE_POINTER, writeShape, normalizeSettings, type FieldSettings, type Pointer } from '../shared/field.ts';
+import { COUNT, FRAME_HEADER, FORMS, DEFAULT_SETTINGS, IDLE_POINTER, writeShape, normalizeSettings, type FieldSettings, type Form, type Pointer } from '../shared/field.ts';
 
 export class ParticleField extends HTMLElement {
   private renderer?: FieldRenderer;
@@ -105,8 +105,12 @@ export class ParticleField extends HTMLElement {
   }
 
   configure(input: Partial<FieldSettings>) {
-    if (input.form && input.form !== this.settings.form) { this.pointer = { ...IDLE_POINTER }; this.updateContact(); }
+    const previousForm = this.settings.form;
     this.settings = normalizeSettings(input, this.settings);
+    if (previousForm !== this.settings.form) {
+      this.pressed = false; this.pointer = { ...IDLE_POINTER }; this.updateContact();
+      writeShape(this.target, this.settings.form, this.displayedTime); this.displayed.set(this.target);
+    }
     this.renderer?.palette(this.settings.palette);
     this.renderer?.topology(this.settings.form);
     this.send({ type: 'settings', settings: this.settings }); this.requestFrame();
@@ -143,7 +147,7 @@ export class ParticleField extends HTMLElement {
     this.worker = new Worker('/worker.js', { type: 'module', name: 'mesh-field' });
     this.worker.addEventListener('message', ({ data }) => {
       if (this.privateActive || data.type !== 'frame') return;
-      if (data.positions instanceof Float32Array && data.positions.length === COUNT * 3) this.frame(data.positions, data.time);
+      if (data.positions instanceof Float32Array && data.positions.length === COUNT * 3) this.frame(data.positions, data.time, data.form);
     });
     this.worker.addEventListener('error', error => this.failure(error));
     this.worker.postMessage({ type: 'settings', settings: this.settings });
@@ -162,14 +166,16 @@ export class ParticleField extends HTMLElement {
         socket.send(JSON.stringify({ type: 'visibility', visible: !document.hidden }));
       });
       socket.addEventListener('message', ({ data }) => {
-        if (!(data instanceof ArrayBuffer) || data.byteLength !== (COUNT * 3 + 2) * 4) return;
+        if (!(data instanceof ArrayBuffer) || data.byteLength !== (COUNT * 3 + FRAME_HEADER) * 4) return;
         const frame = new Float32Array(data);
         if (frame[1] !== COUNT || !Number.isFinite(frame[0])) return;
+        const form = FORMS[frame[2]!];
+        if (!form || form !== this.settings.form) return;
         if (!this.privateActive) {
           this.privateActive = true; this.worker?.terminate(); this.worker = undefined;
           if (this.connectionTimer) clearTimeout(this.connectionTimer);
         }
-        this.frame(frame.subarray(2), frame[0]!);
+        this.frame(frame.subarray(FRAME_HEADER), frame[0]!, form);
       });
       socket.addEventListener('close', () => { this.privateActive = false; this.socket = undefined; this.startWorker(); });
       socket.addEventListener('error', () => socket.close());
@@ -177,11 +183,12 @@ export class ParticleField extends HTMLElement {
   }
 
   private send(message: Record<string, unknown>) {
-    if (this.privateActive && this.socket?.readyState === WebSocket.OPEN) this.socket.send(JSON.stringify(message));
-    else this.worker?.postMessage(message);
+    if (this.socket?.readyState === WebSocket.OPEN) this.socket.send(JSON.stringify(message));
+    if (!this.privateActive) this.worker?.postMessage(message);
   }
 
-  private frame(positions: Float32Array, time: number) {
+  private frame(positions: Float32Array, time: number, form: Form) {
+    if (form !== this.settings.form) return;
     this.target = positions; this.targetTime = time; this.requestFrame();
   }
 

@@ -7,7 +7,7 @@ let previous = performance.now(), remainder = 0, lastSent = 0, visible = true;
 const worker = self as unknown as DedicatedWorkerGlobalScope;
 function send() {
   const positions = simulation.positions.slice();
-  worker.postMessage({ type: 'frame', positions, time: simulation.time }, [positions.buffer]);
+  worker.postMessage({ type: 'frame', positions, time: simulation.time, form: simulation.settings.form }, [positions.buffer]);
 }
 worker.onmessage = ({ data }: MessageEvent) => {
   if (data.type === 'settings') { simulation.configure(data.settings as Partial<FieldSettings>); send(); }

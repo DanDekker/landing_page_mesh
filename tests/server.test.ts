@@ -2,7 +2,7 @@ import { afterAll, expect, test } from 'bun:test';
 import { mkdtempSync, writeFileSync, unlinkSync, rmdirSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { createServer, loadPrivateFactory } from '../src/server.ts';
-import { COUNT } from '../src/shared/field.ts';
+import { COUNT, FRAME_HEADER, FORMS, writeShape } from '../src/shared/field.ts';
 
 const instance = createServer({ port: 0, hostname: '127.0.0.1', privateFactory: null });
 const base = instance.server.url;
@@ -49,7 +49,7 @@ test('a private provider streams coordinates and releases its session', async ()
   let disposed = 0, allocated = 0;
   const privateInstance = createServer({ port: 0, hostname: '127.0.0.1', privateFactory: topology => {
     allocated++;
-    return { advance() { return { positions: topology.positions, time: .5 }; }, dispose() { disposed++; } };
+    return { advance(input) { writeShape(topology.positions, input.settings.form); return { positions: topology.positions, time: .5 }; }, dispose() { disposed++; } };
   } });
   const url = new URL('field', privateInstance.server.url);
   try {
@@ -61,11 +61,20 @@ test('a private provider streams coordinates and releases its session', async ()
     socket.binaryType = 'arraybuffer';
     await new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => { socket.close(); reject(new Error('No coordinate frame')); }, 2000);
+      let switched = false;
       socket.onmessage = event => {
         try {
           const frame = new Float32Array(event.data as ArrayBuffer);
-          expect(frame.length).toBe(COUNT * 3 + 2); expect(frame[0]).toBe(.5); expect(frame[1]).toBe(COUNT);
+          expect(frame.length).toBe(COUNT * 3 + FRAME_HEADER); expect(frame[0]).toBe(.5); expect(frame[1]).toBe(COUNT);
           expect(frame.every(Number.isFinite)).toBe(true);
+          const form = FORMS[frame[2]!];
+          if (!switched) {
+            expect(form).toBe('silk'); switched = true;
+            socket.send(JSON.stringify({ type: 'settings', settings: { form: 'cube', paused: true } }));
+            return;
+          }
+          if (form === 'silk') return;
+          expect(form).toBe('cube'); expect(frame[FRAME_HEADER]).toBeCloseTo(1.04, 5);
           socket.close(); clearTimeout(timer); resolve();
         } catch (error) { clearTimeout(timer); socket.close(); reject(error); }
       };

@@ -1,7 +1,7 @@
 import { realpathSync } from 'node:fs';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { COUNT, ROWS, COLUMNS, HZ, DEFAULT_SETTINGS, IDLE_POINTER, createEdges, writeShape, normalizeSettings, type FieldSettings, type Pointer, type WheelKick } from './shared/field.ts';
+import { COUNT, ROWS, COLUMNS, HZ, FRAME_HEADER, FORMS, DEFAULT_SETTINGS, IDLE_POINTER, createEdges, writeShape, normalizeSettings, type FieldSettings, type Pointer, type WheelKick } from './shared/field.ts';
 import type { PrivateFactory, PrivateField, FieldPulse } from './server/provider.ts';
 
 const ROOT = fileURLToPath(new URL('../', import.meta.url));
@@ -45,7 +45,7 @@ export function createServer(options: { port?: number; hostname?: string; privat
         try {
           const positions = new Float32Array(COUNT * 3); writeShape(positions, 'silk');
           field = factory({ count: COUNT, rows: ROWS, columns: COLUMNS, hz: HZ, positions, edges: createEdges() });
-          if (server.upgrade(request, { data: { field, settings: { ...DEFAULT_SETTINGS }, pointer: { ...IDLE_POINTER }, pulses: [], kicks: [], reset: false, visible: true, dirty: true, previous: performance.now(), lastSent: 0, frame: new Float32Array(COUNT * 3 + 2) } })) return;
+          if (server.upgrade(request, { data: { field, settings: { ...DEFAULT_SETTINGS }, pointer: { ...IDLE_POINTER }, pulses: [], kicks: [], reset: false, visible: true, dirty: true, previous: performance.now(), lastSent: 0, frame: new Float32Array(COUNT * 3 + FRAME_HEADER) } })) return;
           field.dispose();
         } catch (error) { field?.dispose(); console.error('Private field could not start:', error); return respond('Field unavailable', 503); }
         return respond('Upgrade required', 426);
@@ -66,7 +66,11 @@ export function createServer(options: { port?: number; hostname?: string; privat
         if (typeof message !== 'string') return;
         try {
           const data = JSON.parse(message), session = socket.data;
-          if (data.type === 'settings' && data.settings && typeof data.settings === 'object') { session.settings = normalizeSettings(data.settings, session.settings); session.dirty = true; }
+          if (data.type === 'settings' && data.settings && typeof data.settings === 'object') {
+            const next = normalizeSettings(data.settings, session.settings);
+            if (next.form !== session.settings.form) { session.pointer = { ...IDLE_POINTER }; session.pulses.length = 0; session.kicks.length = 0; }
+            session.settings = next; session.dirty = true;
+          }
           if (data.type === 'pointer' && data.pointer) {
             const p = data.pointer;
             if ([p.x, p.y, p.z].every((value: unknown) => typeof value === 'number' && Number.isFinite(value) && Math.abs(value) < 30)) session.pointer = { x: p.x, y: p.y, z: p.z, down: p.down === true, active: p.active === true, index: Number.isInteger(p.index) && p.index >= 0 && p.index < COUNT ? p.index : -1 };
@@ -94,7 +98,7 @@ export function createServer(options: { port?: number; hostname?: string; privat
         session.pulses.length = 0; session.kicks.length = 0; session.reset = false;
         if (frame.positions.length !== COUNT * 3 || !Number.isFinite(frame.time) || !frame.positions.every(value => Number.isFinite(value) && Math.abs(value) < 10)) throw new Error('Invalid field frame');
         if (now - session.lastSent < 1000 / 60 || socket.getBufferedAmount() > session.frame.byteLength * 3) continue;
-        session.frame[0] = frame.time; session.frame[1] = COUNT; session.frame.set(frame.positions, 2);
+        session.frame[0] = frame.time; session.frame[1] = COUNT; session.frame[2] = FORMS.indexOf(session.settings.form); session.frame.set(frame.positions, FRAME_HEADER);
         socket.sendBinary(session.frame); session.lastSent = now; session.dirty = false;
       } catch (error) { console.error('Private field stopped:', error); socket.close(1011, 'Field unavailable'); }
     }
