@@ -17,23 +17,22 @@ describe('field geometry', () => {
     expect(normalizeSettings({ turbulence: Infinity, tension: -4, form: 'unknown' as never })).toMatchObject({ turbulence: .32, tension: 0, form: 'silk' });
   });
 
-  test('sphere, cube and pyramid retain their exact undeformed surfaces', () => {
+  test('sphere and cube retain their exact undeformed surfaces', () => {
     const positions = new Float32Array(COUNT * 3);
-    for (const form of ['sphere', 'cube', 'pyramid'] as const) {
+    for (const form of ['sphere', 'cube'] as const) {
       writeShape(positions, form);
       let error = 0;
       for (const index of pointIndices(form)) {
         const x = positions[index * 3]!, y = positions[index * 3 + 1]!, z = positions[index * 3 + 2]!;
         if (form === 'sphere') error = Math.max(error, Math.abs(Math.hypot(x, y, z) - 1.36));
         if (form === 'cube') error = Math.max(error, Math.abs(Math.max(Math.abs(x), Math.abs(y), Math.abs(z)) - 1.04));
-        if (form === 'pyramid') error = Math.max(error, Math.min(Math.abs(y + .84), Math.abs(Math.max(Math.abs(x), Math.abs(z)) / 1.22 + (y + .84) / 2.35 - 1)));
       }
       expect(error).toBeLessThan(.000001);
     }
   });
 
   test('closed caps share one visible vertex and contain no disconnected or collapsed edges', () => {
-    for (const form of ['sphere', 'cube', 'pyramid'] as const) {
+    for (const form of ['sphere', 'cube'] as const) {
       const points = pointIndices(form), active = new Set(points), edges = createEdges(form);
       let lower = 0, upper = 0;
       expect(points.length).toBe(ROWS * (COLUMNS - 2) + 2);

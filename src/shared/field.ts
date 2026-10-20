@@ -1,4 +1,4 @@
-export type Form = 'silk' | 'orbit' | 'wave' | 'knot' | 'sphere' | 'cube' | 'pyramid';
+export type Form = 'silk' | 'orbit' | 'wave' | 'knot' | 'sphere' | 'cube';
 export type Palette = 'alpine';
 export type FieldSettings = { form: Form; turbulence: number; tension: number; paused: boolean; palette: Palette };
 export type Pointer = { x: number; y: number; z: number; active: boolean; down: boolean; index?: number };
@@ -8,7 +8,7 @@ export const COLUMNS = 40;
 export const COUNT = ROWS * COLUMNS;
 export const HZ = 77;
 export const DEFAULT_SETTINGS: FieldSettings = { form: 'silk', turbulence: .32, tension: .65, paused: false, palette: 'alpine' };
-export const FORMS: Form[] = ['silk', 'orbit', 'wave', 'knot', 'sphere', 'cube', 'pyramid'];
+export const FORMS: Form[] = ['silk', 'orbit', 'wave', 'knot', 'sphere', 'cube'];
 export const PALETTES: Palette[] = ['alpine'];
 export const IDLE_POINTER: Pointer = { x: 0, y: 0, z: 0, active: false, down: false };
 
@@ -63,16 +63,9 @@ export function writeShape(target: Float32Array, form: Form, time = 0, torsion =
           const px = edge === 0 ? 1 : edge === 1 ? -t : edge === 2 ? -1 : t;
           const pz = edge === 0 ? t : edge === 1 ? 1 : edge === 2 ? -t : -1;
           let radius: number;
-          if (form === 'cube') {
-            radius = column <= 8 ? column / 8 : column >= 31 ? (COLUMNS - 1 - column) / 8 : 1;
-            y = column <= 8 ? -1.04 : column >= 31 ? 1.04 : (column - 8) / 23 * 2.08 - 1.04;
-            x = px * radius * 1.04; z = pz * radius * 1.04;
-          } else {
-            const height = Math.max(0, (column - 8) / (COLUMNS - 1 - 8));
-            radius = column <= 8 ? column / 8 : 1 - height;
-            y = -.84 + height * 2.35;
-            x = px * radius * 1.22; z = pz * radius * 1.22;
-          }
+          radius = column <= 8 ? column / 8 : column >= 31 ? (COLUMNS - 1 - column) / 8 : 1;
+          y = column <= 8 ? -1.04 : column >= 31 ? 1.04 : (column - 8) / 23 * 2.08 - 1.04;
+          x = px * radius * 1.04; z = pz * radius * 1.04;
         }
         const twist = torsion * y * .8;
         target[at] = x * Math.cos(twist) - z * Math.sin(twist);
@@ -91,7 +84,7 @@ export function writeShape(target: Float32Array, form: Form, time = 0, torsion =
   }
 }
 
-export function isCapped(form: Form) { return form === 'sphere' || form === 'cube' || form === 'pyramid'; }
+export function isCapped(form: Form) { return form === 'sphere' || form === 'cube'; }
 
 export function pointIndices(form: Form): Uint16Array {
   const indices: number[] = [];
